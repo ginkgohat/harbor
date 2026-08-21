@@ -330,3 +330,57 @@ def test_resolve_roots_fallback():
     roots = resolve_roots([], None)
     assert len(roots) == 1
     assert roots[0][0] == os.getcwd()
+
+
+# ---------------------------------------------------------------------------
+# __main__ — port-in-use error handling
+# ---------------------------------------------------------------------------
+
+import pytest
+from unittest.mock import patch
+from harbor.__main__ import _create_server
+from harbor.server import Handler
+
+
+def test_create_server_port_in_use_exits_with_friendly_message(caplog):
+    """When the port is already in use, _create_server exits with code 1
+    and logs a helpful error message."""
+    # Simulate "Address already in use" OSError (errno 48 on macOS/Linux)
+    with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
+        mock_cls.side_effect = OSError(48, "Address already in use")
+        with pytest.raises(SystemExit) as exc_info:
+            _create_server(8765)
+        assert exc_info.value.code == 1
+
+    assert "Port 8765 is already in use" in caplog.text
+    assert "harbor --port <number>" in caplog.text
+    assert "lsof -i :8765" in caplog.text
+
+
+def test_create_server_port_in_use_by_message_text(caplog):
+    """Some platforms may set errno differently but include the message text."""
+    with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
+        mock_cls.side_effect = OSError(99, "Address already in use")
+        with pytest.raises(SystemExit) as exc_info:
+            _create_server(8765)
+        assert exc_info.value.code == 1
+
+    assert "Port 8765 is already in use" in caplog.text
+
+
+def test_create_server_other_oserror_is_raised():
+    """Unrelated OSErrors should bubble up unchanged."""
+    with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
+        mock_cls.side_effect = OSError(13, "Permission denied")
+        with pytest.raises(OSError) as exc_info:
+            _create_server(80)
+        assert exc_info.value.errno == 13
+
+
+def test_create_server_success():
+    """Happy path: server is created and returned."""
+    with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
+        mock_server = mock_cls.return_value
+        result = _create_server(8765)
+        assert result is mock_server
+        mock_cls.assert_called_once_with(("127.0.0.1", 8765), Handler)

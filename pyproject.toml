@@ -29,7 +29,7 @@ Repository = "https://github.com/ginkgohat/harbor"
 harbor = "harbor.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-timeout", "ruff"]
+dev = ["pytest>=7", "pytest-timeout", "ruff", "pytest-cov"]
 
 [build-system]
 requires = ["setuptools>=64"]
@@ -70,3 +70,17 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["harbor"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# Minimum total coverage required. CI will fail if coverage drops below this.
+# Raise this bar gradually as test coverage improves.
+fail_under = 70
+
+[tool.coverage.html]
+directory = "htmlcov"

@@ -22,6 +22,27 @@ from .server import Handler
 logger = logging.getLogger(__name__)
 
 
+def _create_server(port: int) -> http.server.ThreadingHTTPServer:
+    """Create and return a ThreadingHTTPServer bound to *port*.
+
+    Raises SystemExit with a friendly message if the port is already in use.
+    Other OSErrors are re-raised as-is.
+    """
+    try:
+        return http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        if e.errno == 48 or "Address already in use" in str(e):
+            logger.error(
+                "Port %d is already in use by another process.\n"
+                "  → Try a different port with:  harbor --port <number>\n"
+                "  → Or find and stop the process using port %d:\n"
+                "       lsof -i :%d",
+                port, port, port,
+            )
+            sys.exit(1)
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Harbor — local web dashboard for managing multiple git repos.",
@@ -125,19 +146,7 @@ def main():
     Handler.cli_min_depth = args.min_depth
     Handler.cli_max_depth = args.max_depth
 
-    try:
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    except OSError as e:
-        if e.errno == 48 or "Address already in use" in str(e):
-            logger.error(
-                "Port %d is already in use by another process.\n"
-                "  → Try a different port with:  harbor --port <number>\n"
-                "  → Or find and stop the process using port %d:\n"
-                "       lsof -i :%d",
-                port, port, port,
-            )
-            sys.exit(1)
-        raise
+    server = _create_server(port)
     url = f"http://127.0.0.1:{port}"
     logger.info("serving at %s", url)
 
