@@ -14,6 +14,8 @@ Thanks for your interest in contributing to Harbor! Every contribution — big o
   - [Running Harbor Locally](#running-harbor-locally)
 - [Project Structure](#project-structure)
 - [Style Guide](#style-guide)
+- [Branch Naming](#branch-naming)
+- [Commit Messages](#commit-messages)
 - [Submitting Changes](#submitting-changes)
 - [Pull Request Checklist](#pull-request-checklist)
 - [Reporting Bugs](#reporting-bugs)
@@ -158,31 +160,112 @@ harbor/
 - Follow the existing dark mode pattern with CSS `prefers-color-scheme`
 - Accessibility matters: use semantic HTML, proper ARIA labels, and keyboard navigation
 
-### Commits
+## Branch Naming
 
-Write clear, descriptive commit messages. Format:
+Branch names follow the same type system as [Conventional Commits](#commit-messages), with a short kebab-case description.
 
 ```
-<type>: <short summary>
-
-<body — what changed and why, if not obvious>
+<type>/<short-kebab-description>
 ```
 
-Common types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`.
+Optionally include an issue number for traceability:
 
-Examples:
-- `fix: handle empty git repos without crashing scanner`
-- `feat: add repo sorting by last modified time`
-- `docs: update contributing guide with setup steps`
+```
+<type>/<issue-number>-<short-kebab-description>
+```
+
+### Types
+
+| Type | Purpose |
+|---|---|
+| `feat` | New feature or capability |
+| `fix` | Bug fix |
+| `docs` | Documentation only changes |
+| `style` | Formatting, white-space, etc. (no code logic change) |
+| `refactor` | Code change that neither fixes a bug nor adds a feature |
+| `perf` | Code change that improves performance |
+| `test` | Adding or correcting tests |
+| `chore` | Maintenance tasks, tooling, build config |
+| `ci` | CI configuration changes |
+| `build` | Build system or external dependencies |
+| `revert` | Reverts a previous change |
+
+### Examples
+
+```
+feat/add-repo-sorting
+fix/empty-repo-crash
+docs/update-contributing-guide
+chore/bump-pytest-version
+feat/123-batch-stash-all
+```
+
+## Commit Messages
+
+This project follows [Conventional Commits v1.0.0](https://www.conventionalcommits.org/en/v1.0.0/). Every commit message should use this format:
+
+```
+<type>[optional scope]: <short summary>
+
+[optional body — what changed and why]
+
+[optional footer(s)]
+```
+
+### Rules
+
+- **Type** is required (see the table in [Branch Naming](#branch-naming)).
+- **Summary** is required, in the imperative mood (e.g. "add", not "adds" or "added"), lowercase first letter, no period at the end.
+- **Scope** is optional — a noun describing the area of the codebase (e.g. `scanner`, `server`, `frontend`).
+- **Body** is optional but recommended for non-trivial changes. Explain *what* and *why*, not *how*.
+- **Breaking changes** are indicated by a `!` after the type/scope *and* a `BREAKING CHANGE:` footer.
+
+### Common types
+
+| Type | Purpose |
+|---|---|
+| `feat` | A new feature (corresponds to MINOR in SemVer) |
+| `fix` | A bug fix (corresponds to PATCH in SemVer) |
+| `docs` | Documentation only changes |
+| `style` | Changes that do not affect the meaning of the code (white-space, formatting, etc.) |
+| `refactor` | A code change that neither fixes a bug nor adds a feature |
+| `perf` | A code change that improves performance |
+| `test` | Adding missing tests or correcting existing tests |
+| `build` | Changes that affect the build system or external dependencies |
+| `ci` | Changes to CI configuration files and scripts |
+| `chore` | Other changes that don't modify src or test files |
+| `revert` | Reverts a previous commit |
+
+### Examples
+
+```
+fix: handle empty git repos without crashing scanner
+```
+
+```
+feat(server): add repo sorting by last modified time
+```
+
+```
+feat!: drop Python 3.8 support
+
+BREAKING CHANGE: Python 3.9 is now the minimum supported version.
+```
+
+```
+docs: update contributing guide with setup steps
+```
+
+> **Tip:** PR titles should also follow the Conventional Commits format, matching the type of the PR.
 
 ## Submitting Changes
 
-1. **Create a branch** from `main`:
+1. **Create a branch** from `main` (see [Branch Naming](#branch-naming) for conventions):
 
    ```bash
    git checkout main
    git pull upstream main
-   git checkout -b my-feature-branch
+   git checkout -b feat/my-new-feature
    ```
 
 2. **Make your changes** and commit them.
