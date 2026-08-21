@@ -46,7 +46,10 @@ def find_repos(root, min_depth=1, max_depth=5, label=None):
             continue
 
         if ".git" in dirnames:
-            name = rel if rel != "." else os.path.basename(root)
+            raw_name = rel if rel != "." else os.path.basename(root)
+            # Normalize path separators to forward slash for consistent
+            # display across platforms (Linux/macOS/Windows).
+            name = raw_name.replace(os.sep, "/")
             repos.append({"name": name, "path": dirpath, "root_label": root_label})
             # Don't descend into a repo — there's nothing useful below.
             dirnames.clear()
