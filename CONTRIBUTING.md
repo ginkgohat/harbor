@@ -1,0 +1,255 @@
+# Contributing to Harbor
+
+Thanks for your interest in contributing to Harbor! Every contribution — big or small — is welcome. This document explains how to set up your development environment, submit changes, and participate in the project.
+
+## Table of Contents
+
+- [Code of Conduct](#code-of-conduct)
+- [What Can I Contribute?](#what-can-i-contribute)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Fork & Clone](#fork--clone)
+  - [Development Setup](#development-setup)
+  - [Running Tests](#running-tests)
+  - [Running Harbor Locally](#running-harbor-locally)
+- [Project Structure](#project-structure)
+- [Style Guide](#style-guide)
+- [Submitting Changes](#submitting-changes)
+- [Pull Request Checklist](#pull-request-checklist)
+- [Reporting Bugs](#reporting-bugs)
+- [Suggesting Features](#suggesting-features)
+- [Release Process](#release-process)
+
+## Code of Conduct
+
+By participating in this project, you agree to abide by the project's standards of respectful and inclusive behavior. Be kind. Be constructive. Assume good faith.
+
+## What Can I Contribute?
+
+Harbor is still in early days, so there are many ways to help:
+
+- **Bug reports** — found something broken? [Open an issue](#reporting-bugs).
+- **Feature requests** — have an idea? [Start a discussion](#suggesting-features).
+- **Documentation** — typos, better examples, new translations (i18n).
+- **Code** — bug fixes, new features, tests, refactoring.
+- **Frontend** — the UI is a single HTML file; improvements to UX, accessibility, and styling are very welcome.
+
+Look for issues tagged **good first issue** if you're new to the project.
+
+> **Just looking to try Harbor?** See the [Quick Start](README.md#quick-start) in the README — you'll be up and running in 30 seconds.
+>
+> This guide is for people who want to **contribute code, tests, or documentation**.
+
+## Getting Started
+
+### Prerequisites
+
+- **Python 3.9 or newer** — Harbor uses only the Python standard library at runtime (zero pip dependencies). The only exception is `tomli` on Python < 3.11, which backports `tomllib`.
+- **Git** (obviously — it's a Git tool)
+- **pytest** and **pytest-timeout** — for running tests; installed via the `[dev]` extras (see below).
+
+No Node.js, no build tools, no database. That's the whole point.
+
+### Fork & Clone
+
+1. Fork the repository on GitHub
+2. Clone your fork locally:
+
+```bash
+git clone https://github.com/your-username/harbor.git
+cd harbor
+```
+
+3. Add the upstream repository to keep your fork up to date:
+
+```bash
+git remote add upstream https://github.com/ginkgohat/harbor.git
+```
+
+### Development Setup
+
+Install Harbor in editable mode so your changes take effect immediately:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Or with the Makefile shortcut:
+
+```bash
+make dev
+```
+
+If you prefer not to install globally, you can use a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+### Running Tests
+
+```bash
+# Using the Makefile
+make test
+
+# Or directly with pytest
+PYTHONPATH=src python3 -m pytest tests/ -v
+
+# Run a specific test file
+PYTHONPATH=src python3 -m pytest tests/test_harbor.py -v
+
+# Run a specific test
+PYTHONPATH=src python3 -m pytest tests/test_harbor.py::test_find_repos_empty -v
+```
+
+Tests create temporary git repositories in your OS temp directory. Everything cleans up automatically.
+
+### Running Harbor Locally
+
+Run `make run` (scans the current directory) or see [README](README.md#from-source) for other options.
+
+**Developer tip**: The frontend is a single static HTML file at `src/harbor/static/index.html`. Edit and refresh — no build step needed.
+
+## Project Structure
+
+```
+harbor/
+├── src/harbor/
+│   ├── __init__.py      # version, package metadata
+│   ├── __main__.py      # CLI entry point (argparse, server start)
+│   ├── config.py        # config file loading/saving (TOML)
+│   ├── scanner.py       # directory scanning, repo discovery
+│   ├── git.py           # git command wrappers, repo operations
+│   ├── server.py        # HTTP server (stdlib http.server), API endpoints, SSE
+│   └── static/
+│       └── index.html   # entire frontend (HTML + CSS + JS in one file)
+├── tests/
+│   └── test_harbor.py   # all unit tests
+├── pyproject.toml       # package metadata, build config
+├── Makefile             # common dev commands
+├── README.md
+└── CONTRIBUTING.md      # ← you are here
+```
+
+### Architecture Notes
+
+- **Zero runtime dependencies**: Harbor uses only the Python standard library. The `dev` optional dependency group (pytest) is the only exception, and it's for development only.
+- **Frontend is a single file**: The UI lives in one HTML file with vanilla JS. No frameworks, no bundlers. This keeps the project simple and deployable as a single pip package.
+- **Concurrency**: Git operations and pull batch runs use `ThreadingHTTPServer` + threads. Python's GIL is fine here because the work is I/O-bound (waiting on git subprocesses).
+- **SSE for progress**: Batch pull uses Server-Sent Events for real-time progress updates.
+
+## Style Guide
+
+### Python
+
+- Follow [PEP 8](https://peps.python.org/pep-0008/) conventions
+- Use 4 spaces for indentation (no tabs)
+- Keep lines under 88 characters where reasonable
+- Use double quotes for docstrings, single quotes otherwise (be consistent with surrounding code)
+- Type hints are encouraged but not required for simple functions
+- All public functions and modules should have docstrings
+
+### Frontend (HTML/CSS/JS)
+
+- Keep it simple — no build tools
+- Use `const`/'let' (not `var`)
+- Follow the existing dark mode pattern with CSS `prefers-color-scheme`
+- Accessibility matters: use semantic HTML, proper ARIA labels, and keyboard navigation
+
+### Commits
+
+Write clear, descriptive commit messages. Format:
+
+```
+<type>: <short summary>
+
+<body — what changed and why, if not obvious>
+```
+
+Common types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`.
+
+Examples:
+- `fix: handle empty git repos without crashing scanner`
+- `feat: add repo sorting by last modified time`
+- `docs: update contributing guide with setup steps`
+
+## Submitting Changes
+
+1. **Create a branch** from `main`:
+
+   ```bash
+   git checkout main
+   git pull upstream main
+   git checkout -b my-feature-branch
+   ```
+
+2. **Make your changes** and commit them.
+
+3. **Run the tests** to make sure nothing is broken:
+
+   ```bash
+   make test
+   ```
+
+4. **Push to your fork**:
+
+   ```bash
+   git push origin my-feature-branch
+   ```
+
+5. **Open a Pull Request** on GitHub. Fill out the PR template (if one exists) and describe what you changed and why.
+
+### What happens next?
+
+- A maintainer will review your PR, usually within a few days.
+- You may get feedback or requests for changes — that's normal! Just push more commits to your branch.
+- Once approved, your PR will be merged into `main`.
+
+## Pull Request Checklist
+
+Before submitting your PR, make sure:
+
+- [ ] All existing tests pass (`make test`)
+- [ ] New features include tests where appropriate
+- [ ] Documentation is updated (README, docstrings, etc.)
+- [ ] The code follows the project's style conventions
+- [ ] Your branch is up to date with `main`
+- [ ] The PR description explains **what** changed and **why**
+
+## Reporting Bugs
+
+When filing a bug report, please include:
+
+1. **Harbor version** (`harbor --version`)
+2. **Python version** (`python --version`)
+3. **Operating system** (Windows/macOS/Linux, which version)
+4. **Steps to reproduce** — what did you do?
+5. **Expected behavior** — what should have happened?
+6. **Actual behavior** — what actually happened? (error messages, screenshots)
+
+The more detail you provide, the faster we can fix it.
+
+## Suggesting Features
+
+Feature requests are welcome! Before opening one:
+
+- Check if there's already an issue or PR for it
+- Consider whether it fits Harbor's scope: **local-first, zero-dependency, multi-repo web dashboard**
+- Explain the use case — what problem does it solve?
+
+## Release Process
+
+(For maintainers)
+
+1. Bump the version in `src/harbor/__init__.py`
+2. Update the changelog if applicable
+3. Commit and tag: `git tag v0.x.x`
+4. Push: `git push --tags`
+5. Build: `python -m build`
+6. Upload to PyPI: `twine upload dist/*`
+
+---
+
+Thanks for contributing! 🚢

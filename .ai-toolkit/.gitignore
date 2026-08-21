@@ -1,0 +1,7 @@
+# Plugin-managed namespace — everything is ignored by default.
+# Only files whitelisted below are committed.
+*
+
+# Committed files (must stay tracked):
+!.gitignore
+!config.yaml

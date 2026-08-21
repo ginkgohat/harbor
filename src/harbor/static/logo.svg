@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <defs>
+    <linearGradient id="bg-01" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a84ff"/>
+      <stop offset="100%" stop-color="#0066cc"/>
+    </linearGradient>
+    <linearGradient id="anchor-01" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e0efff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 圆形背景 -->
+  <circle cx="60" cy="60" r="56" fill="url(#bg-01)"/>
+
+  <!-- 海浪（底部） -->
+  <path d="M 8 72 Q 22 64 36 72 Q 50 80 64 72 Q 78 64 92 72 Q 106 80 112 74 L 112 112 Q 60 120 8 112 Z"
+        fill="rgba(255,255,255,0.12)"/>
+  <path d="M 8 82 Q 22 74 36 82 Q 50 90 64 82 Q 78 74 92 82 Q 106 90 112 84 L 112 112 Q 60 118 8 112 Z"
+        fill="rgba(255,255,255,0.08)"/>
+
+  <!-- 锚（主标志） -->
+  <g transform="translate(60, 54)" fill="none" stroke="url(#anchor-01)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 锚环 -->
+    <circle cx="0" cy="-20" r="8" fill="none"/>
+    <!-- 锚干 -->
+    <line x1="0" y1="-12" x2="0" y2="24"/>
+    <!-- 锚横杆 -->
+    <line x1="-14" y1="-4" x2="14" y2="-4"/>
+    <!-- 左锚爪 -->
+    <path d="M -14 -4 Q -22 4 -18 14 Q -14 12 -12 8"/>
+    <!-- 右锚爪 -->
+    <path d="M 14 -4 Q 22 4 18 14 Q 14 12 12 8"/>
+    <!-- 锚尖（底部） -->
+    <path d="M 0 24 L -6 32 L 0 36 L 6 32 Z" fill="url(#anchor-01)"/>
+  </g>
+</svg>

@@ -1,0 +1,72 @@
+[project]
+name = "harbor"
+dynamic = ["version"]
+description = "A local web dashboard for managing multiple git repositories at once."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = [
+    "tomli>=1.1; python_version < '3.11'",
+]
+
+[project.urls]
+Homepage = "https://github.com/ginkgohat/harbor"
+Repository = "https://github.com/ginkgohat/harbor"
+
+[project.scripts]
+harbor = "harbor.__main__:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-timeout", "ruff"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "harbor.__version__"}
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+extend-exclude = [
+    "*.egg-info",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long — handled by formatter / too noisy for stdlib style
+    "B008",  # do not perform function calls in argument defaults — common in argparse
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,1247 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<title>Harbor</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --card-border: rgba(0,0,0,.06);
+    --hairline: rgba(0,0,0,.08);
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --faint: #aeaeb2;
+    --accent: #0071e3;
+    --accent-soft: rgba(0,113,227,.1);
+    --success: #248a3d;
+    --success-soft: rgba(52,199,89,.14);
+    --warning: #c26100;
+    --warning-soft: rgba(255,149,0,.14);
+    --danger: #d70015;
+    --danger-soft: rgba(255,59,48,.12);
+    --purple: #5856d6;
+    --purple-soft: rgba(88,86,214,.14);
+    --vscode: #007acc;
+    --vscode-soft: rgba(0,122,204,.14);
+    --shadow-1: 0 1px 2px rgba(0,0,0,.04);
+    --shadow-2: 0 10px 30px rgba(0,0,0,.08);
+    --header-bg: rgba(245,245,247,.78);
+    --modal-bg: rgba(255,255,255,.92);
+    --modal-overlay: rgba(0,0,0,.32);
+    --seg-bg: rgba(0,0,0,.05);
+    --seg-on: #fff;
+    --search-bg: rgba(0,0,0,.04);
+    --search-focus-bg: #fff;
+    --icon-btn-bg: rgba(0,0,0,.045);
+    --synced-item-bg: rgba(0,0,0,.03);
+    --synced-item-hover: rgba(0,0,0,.055);
+    --diff-bg: #fbfbfc;
+    --terminal-bg: rgba(30,30,32,.92);
+    --ghost-bg: rgba(0,0,0,.05);
+    --ghost-hover: rgba(0,0,0,.08);
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e;
+      --card: #2c2c2e;
+      --card-border: rgba(255,255,255,.08);
+      --hairline: rgba(255,255,255,.1);
+      --text: #f5f5f7;
+      --muted: #98989d;
+      --faint: #636366;
+      --accent: #0a84ff;
+      --accent-soft: rgba(10,132,255,.18);
+      --success: #30d158;
+      --success-soft: rgba(48,209,88,.18);
+      --warning: #ff9f0a;
+      --warning-soft: rgba(255,159,10,.18);
+      --danger: #ff453a;
+      --danger-soft: rgba(255,69,58,.18);
+      --purple: #a78bfa;
+      --purple-soft: rgba(167,139,250,.18);
+      --vscode: #4da6ff;
+      --vscode-soft: rgba(77,166,255,.18);
+      --shadow-1: 0 1px 2px rgba(0,0,0,.2);
+      --shadow-2: 0 10px 30px rgba(0,0,0,.4);
+      --header-bg: rgba(28,28,30,.78);
+      --modal-bg: rgba(44,44,46,.92);
+      --modal-overlay: rgba(0,0,0,.55);
+      --seg-bg: rgba(255,255,255,.08);
+      --seg-on: #3a3a3c;
+      --search-bg: rgba(255,255,255,.06);
+      --search-focus-bg: #3a3a3c;
+      --icon-btn-bg: rgba(255,255,255,.06);
+      --synced-item-bg: rgba(255,255,255,.04);
+      --synced-item-hover: rgba(255,255,255,.08);
+      --diff-bg: #1c1c1e;
+      --terminal-bg: rgba(18,18,20,.92);
+      --ghost-bg: rgba(255,255,255,.06);
+      --ghost-hover: rgba(255,255,255,.1);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  svg { display: block; flex: none; }
+
+  /* ---------- header ---------- */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    background: var(--header-bg);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border-bottom: 1px solid var(--hairline);
+    padding: 18px 32px;
+  }
+  .header-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .mark {
+    width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  }
+  .brand .mark img { width: 32px; height: 32px; display: block; }
+  .brand h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
+  .stats { color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+  .stats b { color: var(--text); font-weight: 600; }
+
+  .toolbar { display: flex; align-items: center; gap: 10px; }
+  .search-wrap { position: relative; }
+  .search-wrap svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--faint); }
+  .search {
+    background: var(--search-bg); border: 1px solid transparent; border-radius: 9px;
+    color: var(--text); font: 13px var(--sans); padding: 7px 12px 7px 30px; width: 180px;
+  }
+  .search::placeholder { color: var(--faint); }
+  .search:focus { background: var(--search-focus-bg); border-color: var(--accent); }
+
+  .segmented {
+    display: flex; background: var(--seg-bg); border-radius: 9px; padding: 2px; gap: 2px;
+  }
+  .segmented button {
+    border: none; background: transparent; color: var(--muted); font-size: 12.5px; font-weight: 500;
+    padding: 6px 12px; border-radius: 7px; cursor: pointer;
+  }
+  .segmented button.on { background: var(--seg-on); color: var(--text); box-shadow: var(--shadow-1); }
+
+  .btn-primary {
+    background: var(--accent); color: #fff; font-weight: 600; font-size: 13.5px;
+    border: none; border-radius: 9px; padding: 8px 16px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 7px;
+    transition: transform .12s ease, filter .12s ease;
+  }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-primary:active { transform: scale(.97); }
+  .btn-primary:disabled { opacity: .5; cursor: default; transform: none; }
+  .btn-primary .spin { display: none; animation: spin 1s linear infinite; }
+  .btn-primary.busy .spin { display: block; }
+  .btn-primary.busy .still { display: none; }
+
+  .progress-track { height: 2px; background: transparent; margin-top: 14px; border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .25s ease; border-radius: 2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------- layout ---------- */
+  main { padding: 24px 32px 80px; max-width: 1280px; margin: 0 auto; transition: padding-bottom .2s ease; }
+body.term-open main { padding-bottom: 260px; }
+  .section-head {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+    margin: 26px 0 12px;
+  }
+  .section-label {
+    font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--muted);
+  }
+  .batch-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--card); border: 1px solid var(--card-border); color: var(--text);
+    font-size: 12.5px; font-weight: 500; padding: 6px 12px; border-radius: 20px; cursor: pointer;
+    box-shadow: var(--shadow-1);
+  }
+  .pill-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .pill-btn.stash { background: var(--warning-soft); border-color: transparent; color: var(--warning); }
+  .pill-btn.danger { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
+  .pill-btn.main { background: var(--purple-soft); border-color: transparent; color: var(--purple); }
+  .pill-btn.stash:hover, .pill-btn.danger:hover, .pill-btn.main:hover { filter: brightness(.96); }
+  .pill-btn:disabled { opacity: .4; cursor: default; }
+  .pill-btn:disabled:hover { border-color: var(--card-border); color: var(--text); }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 12px;
+  }
+
+  /* ---------- card ---------- */
+  .card {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    padding: 14px 16px;
+    box-shadow: var(--shadow-1);
+    transition: box-shadow .18s ease, transform .18s ease;
+  }
+  .card:hover { box-shadow: var(--shadow-2); transform: translateY(-1px); }
+
+  .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .card-name { font-size: 14px; font-weight: 600; word-break: break-all; letter-spacing: -0.01em; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+  .dot.running { background: var(--warning); animation: pulse 1s infinite; }
+  .dot.success { background: var(--success); }
+  .dot.failed { background: var(--danger); }
+  .dot.skipped { background: var(--faint); }
+  @keyframes pulse { 50% { opacity: .3; } }
+
+  .card-branch {
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+    margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  }
+  .tag {
+    font-family: var(--sans); font-size: 10.5px; font-weight: 600; padding: 2px 7px; border-radius: 6px;
+    color: var(--muted); background: var(--seg-bg);
+  }
+  .tag.dirty { color: var(--warning); background: var(--warning-soft); }
+  .tag.detached { color: var(--danger); background: var(--danger-soft); }
+  .tag.behind { color: var(--accent); background: var(--accent-soft); }
+  .tag.root { color: var(--muted); background: var(--seg-bg); font-family: var(--mono); font-size: 10px; }
+
+  /* ---------- root group ---------- */
+  .root-group { margin-bottom: 20px; }
+  .root-group-header {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 600; color: var(--text);
+    margin-bottom: 10px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .root-group-header .count { font-size: 11.5px; font-weight: 500; color: var(--muted); }
+  .root-group-header .path { font-size: 11px; font-weight: 400; color: var(--faint); font-family: var(--mono); }
+
+  .card-msg {
+    margin-top: 8px; font-size: 11px; color: var(--muted); font-family: var(--mono);
+    min-height: 14px; line-height: 1.4;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .card-msg.err { color: var(--danger); }
+
+  .card-actions { display: flex; gap: 5px; margin-top: 12px; flex-wrap: wrap; }
+  .icon-btn {
+    background: var(--icon-btn-bg); border: none; color: var(--muted);
+    font-size: 11.5px; font-weight: 600; padding: 6px 10px; border-radius: 8px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; transition: filter .12s ease;
+  }
+  .icon-btn:hover { filter: brightness(.94); }
+  .icon-btn:disabled { opacity: .35; cursor: default; filter: none; }
+  .icon-btn.act-pull { background: var(--success-soft); color: var(--success); }
+  .icon-btn.act-stash { background: var(--warning-soft); color: var(--warning); }
+  .icon-btn.act-main { background: var(--purple-soft); color: var(--purple); }
+  .icon-btn.act-discard { background: var(--danger-soft); color: var(--danger); }
+  .icon-btn.act-preview { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--card-border); }
+  .icon-btn.act-vscode { background: var(--vscode-soft); color: var(--vscode); }
+
+  /* ---------- synced strip ---------- */
+  .synced-strip {
+    border: 1px solid var(--card-border); border-radius: 14px; background: var(--card);
+    padding: 13px 16px; color: var(--muted); font-size: 13px; box-shadow: var(--shadow-1);
+    display: flex; align-items: center; justify-content: space-between; cursor: pointer;
+  }
+  .synced-strip:hover { box-shadow: var(--shadow-2); }
+  .synced-strip b { color: var(--success); }
+  .synced-strip .chev { transition: transform .15s ease; color: var(--faint); }
+  .synced-strip.open .chev { transform: rotate(180deg); }
+  .synced-list {
+    display: none; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 8px; margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--hairline);
+  }
+  .synced-list.show { display: grid; }
+  .synced-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: var(--synced-item-bg); border-radius: 10px; padding: 8px 8px 8px 10px;
+    transition: background .12s ease;
+  }
+  .synced-item:hover { background: var(--synced-item-hover); }
+  .synced-item .name {
+    display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .synced-item .name svg { color: var(--success); flex: none; }
+  .synced-item .branch {
+    font-family: var(--mono); font-size: 10px; color: var(--muted); background: var(--seg-bg);
+    padding: 3px 7px; border-radius: 6px; flex: none; white-space: nowrap;
+  }
+
+  .empty { color: var(--muted); font-size: 13px; padding: 34px 0; text-align: center; grid-column: 1/-1; }
+  .empty code { background: var(--seg-bg); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+  /* ---------- modal ---------- */
+  #modalOverlay {
+    display: none; position: fixed; inset: 0; background: var(--modal-overlay);
+    align-items: center; justify-content: center; z-index: 100;
+  }
+  #modalOverlay.show { display: flex; }
+  #modal {
+    background: var(--modal-bg); backdrop-filter: blur(20px);
+    border-radius: 16px; padding: 22px; width: 380px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.25); text-align: center;
+  }
+  #modal h3 { margin: 0 0 8px; font-size: 16px; font-weight: 700; }
+  #modal p { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0; }
+  #modalCmd {
+    display: block; font-family: var(--mono); font-size: 11.5px; color: var(--danger);
+    background: var(--danger-soft); border-radius: 8px;
+    padding: 8px 11px; margin: 14px 0 0;
+  }
+  .modal-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+  .btn-block { border: none; border-radius: 10px; padding: 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .btn-block.ghost { background: var(--ghost-bg); color: var(--text); }
+  .btn-block.ghost:hover { background: var(--ghost-hover); }
+  .btn-block.danger { background: var(--danger); color: #fff; }
+  .btn-block.danger:hover { filter: brightness(1.08); }
+
+  /* ---------- diff viewer ---------- */
+  #diffOverlay {
+    display: none; position: fixed; inset: 0; background: var(--modal-overlay);
+    align-items: center; justify-content: center; z-index: 110; padding: 40px;
+  }
+  #diffOverlay.show { display: flex; }
+  #diffModal {
+    background: var(--card); border-radius: 16px; width: 100%; max-width: 860px; height: 100%;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0,0,0,.3);
+  }
+  #diffHead {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--hairline); flex: none;
+  }
+  #diffHead .title { display: flex; align-items: center; gap: 10px; }
+  #diffHead h3 { margin: 0; font-size: 15px; font-weight: 700; }
+  #diffHead .sub { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  #diffClose {
+    background: var(--icon-btn-bg); border: none; width: 26px; height: 26px; border-radius: 50%;
+    cursor: pointer; color: var(--muted); display: flex; align-items: center; justify-content: center;
+  }
+  #diffClose:hover { background: var(--ghost-hover); }
+  #diffUntracked {
+    padding: 10px 18px; font-size: 12px; color: var(--warning); background: var(--warning-soft);
+    font-family: var(--mono); flex: none; display: none;
+  }
+  #diffUntracked.show { display: block; }
+  #diffBody {
+    flex: 1; overflow: auto; padding: 14px 0; font-family: var(--mono); font-size: 12px; line-height: 1.6;
+    background: var(--diff-bg);
+  }
+  #diffBody .d-line { padding: 0 18px; white-space: pre-wrap; word-break: break-all; }
+  #diffBody .d-add { background: var(--success-soft); color: var(--success); }
+  #diffBody .d-del { background: var(--danger-soft); color: var(--danger); }
+  #diffBody .d-hunk { color: var(--accent); font-weight: 600; margin-top: 6px; }
+  #diffBody .d-meta { color: var(--faint); }
+  #diffBody .d-empty { color: var(--muted); text-align: center; padding: 40px 0; }
+
+  /* ---------- terminal drawer ---------- */
+  #terminal {
+    position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 30;
+    background: var(--terminal-bg); backdrop-filter: blur(20px);
+    border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25);
+    transition: height .2s ease; height: 38px; overflow: hidden; max-width: 1248px; margin: 0 auto;
+  }
+  #terminal.open { height: 230px; }
+  #terminalHead {
+    height: 38px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px 0 14px; cursor: pointer; font-family: var(--mono); font-size: 11.5px; color: #b8b8bd;
+  }
+  #terminalHead .lbl { display: flex; align-items: center; gap: 9px; }
+  .traffic { display: flex; gap: 6px; }
+  .traffic span { width: 9px; height: 9px; border-radius: 50%; }
+  .traffic span:nth-child(1) { background: #ff5f57; }
+  .traffic span:nth-child(2) { background: #febc2e; }
+  .traffic span:nth-child(3) { background: #28c840; }
+  #terminalHead .chev { transition: transform .15s ease; color: #7c7c82; }
+  #terminal.open #terminalHead .chev { transform: rotate(180deg); }
+  #terminalBody {
+    height: calc(230px - 38px); overflow-y: auto; padding: 0 14px 10px;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.7;
+  }
+  #terminalBody .line { color: #b8b8bd; }
+  #terminalBody .line .r { color: #64d2ff; }
+  #terminalBody .line.ok .r { color: #30d158; }
+  #terminalBody .line.fail { color: #ff6961; }
+  #terminalBody .line.skip { color: #7c7c82; }
+  .term-clear { color: #7c7c82; background: none; border: none; cursor: pointer; font-size: 11px; font-family: var(--sans); }
+  .term-clear:hover { color: #fff; }
+
+  /* ---------- settings ---------- */
+  .settings-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    padding: 4px; border-radius: 6px; display: flex; align-items: center;
+    transition: color .15s ease, background .15s ease;
+  }
+  .settings-btn:hover { color: var(--text); background: var(--seg-bg); }
+  #settingsOverlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.2);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    align-items: center; justify-content: center; z-index: 120;
+  }
+  @media (prefers-color-scheme: dark) { #settingsOverlay { background: rgba(0,0,0,.45); } }
+  #settingsOverlay.show { display: flex; }
+  #settingsModal {
+    background: var(--modal-bg); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+    border-radius: 16px; width: 460px; max-height: 78vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 25px 60px rgba(0,0,0,.2), 0 0 0 0.5px rgba(0,0,0,.08);
+    animation: modalIn .22s cubic-bezier(.2,.8,.4,1);
+  }
+  @keyframes modalIn { from { opacity: 0; transform: scale(.96) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+  #settingsHead {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 20px 14px; flex: none;
+  }
+  #settingsHead h3 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+  #settingsClose {
+    background: var(--icon-btn-bg); border: none; width: 28px; height: 28px; border-radius: 50%;
+    cursor: pointer; color: var(--muted); display: flex; align-items: center; justify-content: center;
+    font-size: 16px; transition: background .15s ease;
+  }
+  #settingsClose:hover { background: var(--ghost-hover); color: var(--text); }
+  #settingsBody { flex: 1; overflow-y: auto; padding: 0 20px 20px; }
+
+  /* root list */
+  #settingsRoots { margin-bottom: 4px; }
+  .root-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 12px; margin: 0 -12px; border-radius: 10px;
+    transition: background .12s ease;
+  }
+  .root-item:hover { background: var(--synced-item-bg); }
+  .root-item .folder-icon { color: var(--accent); flex: none; }
+  .root-item .info { flex: 1; min-width: 0; }
+  .root-item .info .label { font-size: 13.5px; font-weight: 600; }
+  .root-item .info .path { font-size: 11px; color: var(--faint); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .root-item .del-btn {
+    background: none; border: none; color: var(--faint); cursor: pointer;
+    font-size: 18px; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    transition: color .12s ease, background .12s ease; flex: none;
+  }
+  .root-item .del-btn:hover { color: var(--danger); background: var(--danger-soft); }
+
+  /* directory browser */
+  .browse-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--hairline); }
+  .browse-section .browse-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 10px; }
+  .browse-quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .browse-quick button {
+    background: var(--seg-bg); border: none; border-radius: 7px; padding: 5px 10px;
+    font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer;
+    font-family: var(--mono); transition: background .12s ease, color .12s ease;
+  }
+  .browse-quick button:hover { background: var(--accent-soft); color: var(--accent); }
+  .browse-path {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 10px;
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    background: var(--search-bg); border-radius: 8px; padding: 6px 10px;
+    overflow: hidden;
+  }
+  .browse-path .sep { color: var(--faint); flex: none; }
+  .browse-path .crumb {
+    color: var(--accent); cursor: pointer; white-space: nowrap;
+    padding: 2px 4px; border-radius: 4px; margin: 0 -4px;
+  }
+  .browse-path .crumb:hover { background: var(--accent-soft); }
+  .browse-path .current { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .browse-list { max-height: 180px; overflow-y: auto; }
+  .browse-list .browse-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 10px; margin: 0 -10px; border-radius: 7px;
+    cursor: pointer; font-size: 13px; transition: background .1s ease;
+  }
+  .browse-list .browse-item:hover { background: var(--accent-soft); }
+  .browse-list .browse-item .fi { color: var(--accent); flex: none; }
+  .browse-list .browse-item .name { font-family: var(--mono); font-size: 12.5px; }
+  .browse-list .browse-item .select-btn {
+    margin-left: auto; background: var(--accent); color: #fff; border: none;
+    border-radius: 6px; padding: 3px 10px; font-size: 11.5px; font-weight: 600; cursor: pointer;
+    opacity: 0; transition: opacity .1s ease;
+  }
+  .browse-list .browse-item:hover .select-btn { opacity: 1; }
+  .browse-list .browse-empty { font-size: 12px; color: var(--faint); padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-row">
+    <div class="brand">
+      <div class="mark">
+        <img src="/static/logo.svg" alt="Harbor" width="28" height="28">
+      </div>
+      <div>
+        <h1>Harbor</h1>
+        <div class="stats" id="stats"></div>
+      </div>
+    </div>
+    <div class="toolbar">
+      <div class="search-wrap">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input class="search" id="search" />
+      </div>
+      <div class="segmented" id="viewToggle">
+        <button class="on" data-view="attention"></button>
+        <button data-view="all"></button>
+      </div>
+      <div class="segmented" id="rootFilter" style="display:none">
+        <button class="on" data-root="">全部</button>
+      </div>
+      <div class="segmented" id="langToggle">
+        <button class="on" data-lang="zh">中</button>
+        <button data-lang="en">EN</button>
+      </div>
+      <button class="btn-primary" id="pullAllBtn">
+        <svg class="still" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v5h5"/><path d="M20 20v-5h-5"/><path d="M5.5 9A7 7 0 0119 10"/><path d="M18.5 15A7 7 0 015 14"/></svg>
+        <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-opacity=".3"/><path d="M21 12a9 9 0 00-9-9"/></svg>
+        <span id="pullAllLabel"></span>
+      </button>
+      <button class="settings-btn" id="refreshBtn" title="Refresh">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15A9 9 0 015.64 18.36L1 14"/></svg>
+      </button>
+      <button class="settings-btn" id="settingsBtn" title="Settings">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+</header>
+
+<main>
+  <div id="attentionSection">
+    <div class="section-head">
+      <div class="section-label" id="attentionLabel">待处理</div>
+      <div class="batch-actions" id="batchActions"></div>
+    </div>
+    <div class="grid" id="attentionGrid"></div>
+  </div>
+
+  <div id="syncedSection">
+    <div class="section-head"><div class="section-label" id="syncedLabel"></div></div>
+    <div class="synced-strip" id="syncedStrip">
+      <span><b id="syncedCount">0</b> <span id="syncedSuffix"></span></span>
+      <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+    <div class="synced-list" id="syncedList"></div>
+  </div>
+</main>
+
+<div id="modalOverlay">
+  <div id="modal">
+    <h3 id="modalTitle"></h3>
+    <p id="modalBody"></p>
+    <code id="modalCmd"></code>
+    <div class="modal-actions">
+      <button class="btn-block danger" id="modalConfirm"></button>
+      <button class="btn-block ghost" id="modalCancel"></button>
+    </div>
+  </div>
+</div>
+
+<div id="diffOverlay">
+  <div id="diffModal">
+    <div id="diffHead">
+      <div class="title">
+        <h3 id="diffTitle">改动预览</h3>
+        <span class="sub" id="diffSub"></span>
+      </div>
+      <button id="diffClose">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div id="diffUntracked"></div>
+    <div id="diffBody"></div>
+  </div>
+</div>
+
+<div id="settingsOverlay">
+  <div id="settingsModal">
+    <div id="settingsHead">
+      <h3>Repositories</h3>
+      <button id="settingsClose">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div id="settingsBody">
+      <div id="settingsRoots"></div>
+      <div class="browse-section">
+        <div class="browse-label">Add directory</div>
+        <div class="browse-quick" id="browseQuick"></div>
+        <div class="browse-path" id="browsePath"></div>
+        <div class="browse-list" id="browseList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="terminal">
+  <div id="terminalHead">
+    <span class="lbl"><span class="traffic"><span></span><span></span><span></span></span><span id="termTitle"></span></span>
+    <span style="display:flex;align-items:center;gap:12px;">
+      <button class="term-clear" id="termClear"></button>
+      <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+    </span>
+  </div>
+  <div id="terminalBody"></div>
+</div>
+
+<script>
+const ICONS = {
+  pull: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg>`,
+  stash: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="9" rx="1.5"/><path d="M4 10l2.3-5h11.4L20 10"/><path d="M10 14.2h4"/></svg>`,
+  discard: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M7 7l1 12a1 1 0 001 1h6a1 1 0 001-1l1-12"/></svg>`,
+  main: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h11a3 3 0 013 3v1"/><path d="M15 4l3 3-3 3"/><path d="M20 17H9a3 3 0 01-3-3v-1"/><path d="M9 20l-3-3 3-3"/></svg>`,
+  check: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>`,
+  preview: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>`,
+  vscode: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l5 3v12l-5 3-9-7 9-7"/><path d="M16 21l-9-7"/><path d="M3 9.5l4 2.5-4 2.5v-5z"/></svg>`,
+};
+
+const STR = {
+  zh: {
+    searchPh: "过滤 repo…",
+    segAttention: "待处理", segAll: "全部",
+    pullAll: "Pull all",
+    sectionAttention: "待处理", sectionAll: "全部 repo", sectionSynced: "已同步",
+    syncedSuffix: "个 repo 已同步到 main / master，无需处理",
+    emptyOk: "✓ 一切正常，没有需要处理的 repo",
+    tagDirty: "改动未提交", tagDetached: "detached",
+    tagBehind: (n) => `落后 ${n}`,
+    btnPull: "Pull", btnStash: "Stash", btnDiscard: "丢弃", btnMain: "main", btnPreview: "预览", btnVscode: "VSCode",
+    refreshTip: "刷新配置",
+    refreshDone: (n) => `已刷新 · ${n} 个 repo`,
+    batchStash: (n) => `Stash 全部 (${n})`,
+    batchDiscard: (n) => `丢弃全部 (${n})`,
+    batchMain: (n) => `切换全部到 main (${n})`,
+    statLine: (total, dirty, nonMain) => `<b>${total}</b> repos · <b>${dirty}</b> 未提交 · <b>${nonMain}</b> 非 main`,
+    confirmDiscardTitle: "丢弃改动",
+    confirmDiscardBody: (name) => `将在 "${name}" 中永久丢弃所有未提交改动和未追踪文件，此操作不可撤销。`,
+    confirmMainTitle: "切换到 main",
+    confirmMainBody: (name) => `将把 "${name}" 切换到 main / master 分支。`,
+    confirmBatchDiscardTitle: "丢弃全部改动",
+    confirmBatchDiscardBody: (n, names) => `将在 ${n} 个 repo（${names}）中永久丢弃所有未提交改动，此操作不可撤销。`,
+    confirmBtn: "确认执行", cancelBtn: "取消",
+    termTitle: "终端日志", termClear: "清空",
+    diffLoading: "加载中…", diffLoadingBody: "加载改动中…", diffLoadFail: "无法加载改动",
+    diffChanged: (n) => `${n} 行改动`,
+    diffUntracked: (n, files) => `+ ${n} 个新文件（未跟踪）：${files}`,
+    diffEmpty: "没有可显示的改动",
+    connError: "⚠️ 无法连接后端服务 —— 请确认 harbor 正在运行",
+    connFailed: "连接失败",
+  },
+  en: {
+    searchPh: "Filter repos…",
+    segAttention: "Needs attention", segAll: "All",
+    pullAll: "Pull all",
+    sectionAttention: "Needs attention", sectionAll: "All repos", sectionSynced: "Synced",
+    syncedSuffix: "repos already synced to main / master",
+    emptyOk: "✓ All clear — nothing needs attention",
+    tagDirty: "uncommitted", tagDetached: "detached",
+    tagBehind: (n) => `${n} behind`,
+    btnPull: "Pull", btnStash: "Stash", btnDiscard: "Discard", btnMain: "main", btnPreview: "Preview", btnVscode: "VSCode",
+    refreshTip: "Refresh config",
+    refreshDone: (n) => `Refreshed · ${n} repos`,
+    batchStash: (n) => `Stash all (${n})`,
+    batchDiscard: (n) => `Discard all (${n})`,
+    batchMain: (n) => `Switch all to main (${n})`,
+    statLine: (total, dirty, nonMain) => `<b>${total}</b> repos · <b>${dirty}</b> uncommitted · <b>${nonMain}</b> non-main`,
+    confirmDiscardTitle: "Discard changes",
+    confirmDiscardBody: (name) => `This will permanently discard all uncommitted changes and untracked files in "${name}". This cannot be undone.`,
+    confirmMainTitle: "Switch to main",
+    confirmMainBody: (name) => `This will check out main / master in "${name}".`,
+    confirmBatchDiscardTitle: "Discard all changes",
+    confirmBatchDiscardBody: (n, names) => `This will permanently discard uncommitted changes in ${n} repos (${names}). This cannot be undone.`,
+    confirmBtn: "Confirm", cancelBtn: "Cancel",
+    termTitle: "Terminal log", termClear: "Clear",
+    diffLoading: "Loading…", diffLoadingBody: "Loading changes…", diffLoadFail: "Failed to load changes",
+    diffChanged: (n) => `${n} lines changed`,
+    diffUntracked: (n, files) => `+ ${n} untracked file(s): ${files}`,
+    diffEmpty: "No changes to show",
+    connError: "⚠️ Cannot connect to backend — make sure harbor is running",
+    connFailed: "Connection failed",
+  },
+};
+
+let lang = localStorage.getItem("harborLang") || "zh";
+function t(key, ...args) {
+  const v = STR[lang][key];
+  return typeof v === "function" ? v(...args) : v;
+}
+
+let repos = [];
+let filterText = "";
+let view = "attention";
+let rootFilter = "";  // empty = all roots
+
+const $ = (sel) => document.querySelector(sel);
+const cssId = (name) => "r-" + encodeURIComponent(name);
+const escHTML = (s) => s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const escAttr = (s) => s.replace(/[&"]/g, c => (c === "&" ? "&amp;" : "&quot;"));
+
+function renderStatic() {
+  document.documentElement.lang = lang;
+  $("#search").placeholder = t("searchPh");
+  $('button[data-view="attention"]').textContent = t("segAttention");
+  $('button[data-view="all"]').textContent = t("segAll");
+  $("#pullAllLabel").textContent = t("pullAll");
+  $("#refreshBtn").title = t("refreshTip");
+  $("#syncedLabel").textContent = t("sectionSynced");
+  $("#syncedSuffix").textContent = t("syncedSuffix");
+  $("#modalConfirm").textContent = t("confirmBtn");
+  $("#modalCancel").textContent = t("cancelBtn");
+  $("#termTitle").textContent = t("termTitle");
+  $("#termClear").textContent = t("termClear");
+}
+
+$("#langToggle").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-lang]");
+  if (!btn) return;
+  lang = btn.dataset.lang;
+  localStorage.setItem("harborLang", lang);
+  $("#langToggle").querySelectorAll("button").forEach(b => b.classList.toggle("on", b === btn));
+  renderStatic();
+  render();
+});
+
+
+/* ---------- refresh / rescan ---------- */
+$("#refreshBtn").addEventListener("click", async () => {
+  const btn = $("#refreshBtn");
+  btn.disabled = true;
+  btn.style.opacity = "0.5";
+  try {
+    const res = await fetch("/api/rescan", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) {
+      await loadRepos();
+      // Briefly show refresh confirmation in stats
+      const stats = $("#stats");
+      const original = stats.innerHTML;
+      stats.innerHTML = t("refreshDone", data.count);
+      setTimeout(() => { stats.innerHTML = original; render(); }, 1500);
+    }
+  } catch (err) {
+    console.error("rescan failed:", err);
+  } finally {
+    btn.disabled = false;
+    btn.style.opacity = "";
+  }
+});
+
+
+function needsAttention(r) {
+  return r.dirty || r.detached || !r.is_main || (r.behind && r.behind > 0);
+}
+
+async function loadRepos() {
+  try {
+    const res = await fetch("/api/repos");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    repos = await res.json();
+    render();
+  } catch (err) {
+    console.error("loadRepos failed:", err);
+    $("#attentionGrid").innerHTML = `<div class="empty">${t("connError")}</div>`;
+    $("#stats").textContent = t("connFailed");
+  }
+}
+
+function render() {
+  const q = filterText.trim().toLowerCase();
+  const visible = repos.filter(r => !q || r.name.toLowerCase().includes(q));
+  const attention = visible.filter(needsAttention);
+  const synced = visible.filter(r => !needsAttention(r));
+
+  // Detect multi-root
+  const rootLabels = [...new Set(repos.map(r => r.root_label).filter(Boolean))].sort();
+  const multiRoot = rootLabels.length > 1;
+
+  // --- Stats ---------------------------------------------------------
+  const statsParts = [];
+  statsParts.push(t("statLine", repos.length, repos.filter(r=>r.dirty).length, repos.filter(r=>!r.is_main).length));
+  if (multiRoot) {
+    for (const rl of rootLabels) {
+      const count = repos.filter(r => r.root_label === rl).length;
+      statsParts.push(`${rl} · ${count}`);
+    }
+  }
+  $("#stats").innerHTML = statsParts.join(" &nbsp;│&nbsp; ");
+
+  // --- Root filter ---------------------------------------------------
+  if (multiRoot) {
+    $("#rootFilter").style.display = "flex";
+    $("#rootFilter").innerHTML = `
+      <button class="${rootFilter === '' ? 'on' : ''}" data-root="">全部</button>
+      ${rootLabels.map(rl =>
+        `<button class="${rootFilter === rl ? 'on' : ''}" data-root="${escAttr(rl)}">${escHTML(rl)}</button>`
+      ).join("")}
+    `;
+  } else {
+    $("#rootFilter").style.display = "none";
+  }
+
+  // --- Filter by root ------------------------------------------------
+  const byRoot = (list) => rootFilter ? list.filter(r => r.root_label === rootFilter) : list;
+
+  // --- Render --------------------------------------------------------
+  const attentionOnly = view === "attention";
+  $("#attentionSection").style.display = (attentionOnly && attention.length === 0) ? "none" : "";
+  $("#attentionLabel").textContent = attentionOnly ? t("sectionAttention") : t("sectionAll");
+
+  const gridRepos = byRoot(attentionOnly ? attention : visible);
+  const filteredSynced = byRoot(synced);
+
+  if (multiRoot) {
+    // Grouped by root
+    $("#attentionGrid").innerHTML = gridRepos.length
+      ? renderGrouped(gridRepos, rootLabels)
+      : `<div class="empty">${t("emptyOk")}</div>`;
+  } else {
+    $("#attentionGrid").innerHTML = gridRepos.length
+      ? gridRepos.map(r => cardHTML(r)).join("")
+      : `<div class="empty">${t("emptyOk")}</div>`;
+  }
+
+  renderBatchActions(attention);
+
+  $("#syncedSection").style.display = attentionOnly ? "" : "none";
+  $("#syncedCount").textContent = filteredSynced.length;
+  $("#syncedList").innerHTML = filteredSynced.map(r => `
+    <div class="synced-item">
+      <span class="name">${ICONS.check}${escHTML(r.name)}</span>
+      ${multiRoot ? `<span class="tag root">${escHTML(r.root_label)}</span>` : ""}
+      <span class="branch">${escHTML(r.branch)}</span>
+    </div>`).join("");
+}
+
+function renderGrouped(repos, rootLabels) {
+  // Group repos by root_label, preserving rootLabels order
+  const groups = {};
+  for (const rl of rootLabels) groups[rl] = [];
+  for (const r of repos) {
+    if (groups[r.root_label]) groups[r.root_label].push(r);
+  }
+  let html = "";
+  for (const rl of rootLabels) {
+    const group = groups[rl];
+    if (!group.length) continue;
+    html += `<div class="root-group">`;
+    html += `<div class="root-group-header">${escHTML(rl)} <span class="count">${group.length} repo${group.length !== 1 ? 's' : ''}</span></div>`;
+    html += `<div class="grid">${group.map(r => cardHTML(r)).join("")}</div>`;
+    html += `</div>`;
+  }
+  return html;
+}
+
+function renderBatchActions(attention) {
+  const dirty = attention.filter(r => r.dirty);
+  const nonMainClean = attention.filter(r => !r.is_main && !r.dirty && !r.detached);
+  const box = $("#batchActions");
+  if (dirty.length === 0 && nonMainClean.length === 0) { box.innerHTML = ""; return; }
+  box.innerHTML = `
+    ${dirty.length ? `<button class="pill-btn stash" id="batchStash">${ICONS.stash} ${t("batchStash", dirty.length)}</button>` : ""}
+    ${dirty.length ? `<button class="pill-btn danger" id="batchDiscard">${ICONS.discard} ${t("batchDiscard", dirty.length)}</button>` : ""}
+    ${nonMainClean.length ? `<button class="pill-btn main" id="batchMain">${ICONS.main} ${t("batchMain", nonMainClean.length)}</button>` : ""}
+  `;
+  if (dirty.length) {
+    $("#batchStash")?.addEventListener("click", () => bulkRun("stash", dirty));
+    $("#batchDiscard")?.addEventListener("click", () => {
+      askConfirm(t("confirmBatchDiscardTitle"),
+        t("confirmBatchDiscardBody", dirty.length, dirty.map(r=>r.name).join(", ")),
+        "git checkout -- . && git clean -fd",
+        () => bulkRun("discard", dirty));
+    });
+  }
+  if (nonMainClean.length) {
+    $("#batchMain")?.addEventListener("click", () => bulkRun("checkout-main", nonMainClean));
+  }
+}
+
+function cardHTML(r) {
+  const id = cssId(r.name);
+  const branchLabel = r.detached ? `detached@${r.branch || "?"}` : r.branch;
+  return `
+  <div class="card" data-state="idle" data-name="${escAttr(r.name)}" data-path="${escAttr(r.path)}" id="card-${id}">
+    <div class="card-top">
+      <div class="card-name">${escHTML(r.name)}</div>
+      <span class="dot" id="dot-${id}"></span>
+    </div>
+    <div class="card-branch">
+      <span>${escHTML(branchLabel)}</span>
+      ${r.dirty ? `<span class="tag dirty">${t("tagDirty")}</span>` : ""}
+      ${r.detached ? `<span class="tag detached">${t("tagDetached")}</span>` : ""}
+      ${(r.behind ?? 0) > 0 ? `<span class="tag behind">${t("tagBehind", r.behind)}</span>` : ""}
+    </div>
+    <div class="card-msg" id="msg-${id}"></div>
+    <div class="card-actions">
+      <button class="icon-btn act-pull" data-act="pull" data-path="${escAttr(r.path)}" ${r.dirty || r.detached ? "disabled" : ""}>${ICONS.pull} ${t("btnPull")}</button>
+      <button class="icon-btn act-stash" data-act="stash" data-path="${escAttr(r.path)}" ${!r.dirty ? "disabled" : ""}>${ICONS.stash} ${t("btnStash")}</button>
+      <button class="icon-btn act-discard" data-act="discard" data-path="${escAttr(r.path)}" ${!r.dirty ? "disabled" : ""}>${ICONS.discard} ${t("btnDiscard")}</button>
+      ${!r.is_main ? `<button class="icon-btn act-main" data-act="checkout-main" data-path="${escAttr(r.path)}" ${r.dirty ? "disabled" : ""}>${ICONS.main} ${t("btnMain")}</button>` : ""}
+      <button class="icon-btn act-preview" data-act="preview" data-path="${escAttr(r.path)}" ${!r.dirty ? "disabled" : ""}>${ICONS.preview} ${t("btnPreview")}</button>
+      <button class="icon-btn act-vscode" data-act="vscode" data-path="${escAttr(r.path)}">${ICONS.vscode} ${t("btnVscode")}</button>
+    </div>
+  </div>`;
+}
+
+/* ---------- search / view toggle ---------- */
+$("#search").addEventListener("input", (e) => { filterText = e.target.value; render(); });
+$("#viewToggle").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-view]");
+  if (!btn) return;
+  view = btn.dataset.view;
+  $("#viewToggle").querySelectorAll("button").forEach(b => b.classList.toggle("on", b === btn));
+  render();
+});
+
+/* ---------- root filter ---------- */
+$("#rootFilter").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-root]");
+  if (!btn) return;
+  rootFilter = btn.dataset.root;
+  render();
+});
+
+/* ---------- synced strip expand ---------- */
+$("#syncedStrip").addEventListener("click", () => {
+  $("#syncedList").classList.toggle("show");
+  $("#syncedStrip").classList.toggle("open");
+});
+
+/* ---------- terminal drawer ---------- */
+$("#terminalHead").addEventListener("click", (e) => {
+  if (e.target.id === "termClear") return;
+  const open = $("#terminal").classList.toggle("open");
+  document.body.classList.toggle("term-open", open);
+});
+$("#termClear").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("#terminalBody").innerHTML = "";
+});
+function termLine(text, cls) {
+  const body = $("#terminalBody");
+  const div = document.createElement("div");
+  div.className = "line" + (cls ? " " + cls : "");
+  div.innerHTML = text;
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+}
+
+/* ---------- pull all ---------- */
+$("#pullAllBtn").addEventListener("click", async () => {
+  const btn = $("#pullAllBtn");
+  btn.disabled = true;
+  btn.classList.add("busy");
+  $("#progressFill").style.width = "0%";
+  $("#terminal").classList.add("open");
+  document.body.classList.add("term-open");
+  termLine(`<span class="r">$</span> pull-all --concurrency 8`);
+
+  document.querySelectorAll(".card").forEach(c => c.dataset.state = "idle");
+
+  const res = await fetch("/api/pull-all", { method: "POST" });
+  const { job_id } = await res.json();
+  const total = repos.length;
+  let done = 0;
+
+  const es = new EventSource(`/api/stream?job=${job_id}`);
+  let retries = 0;
+  es.onmessage = (ev) => {
+    retries = 0;
+    const data = JSON.parse(ev.data);
+    if (data.done) {
+      es.close();
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      $("#progressFill").style.width = "100%";
+      termLine(`<span class="r">✓</span> done`);
+      loadRepos();
+      return;
+    }
+    if (data.error) {
+      // Worker-level failure (e.g. an unhandled exception in pull_one).
+      // Surface as a terminal line so the progress bar can still advance
+      // via the upcoming "done" event.
+      termLine(`<span class="r">✗</span> ${escHTML(data.repo)} ${escHTML(data.error)}`, "fail");
+      return;
+    }
+    setCardStatus(data.repo, data.status, data.message);
+    if (data.status !== "running") {
+      done++;
+      $("#progressFill").style.width = `${Math.min(100, (done/total)*100)}%`;
+      const cls = data.status === "success" ? "ok" : data.status === "failed" ? "fail" : "skip";
+      const mark = data.status === "success" ? "✓" : data.status === "failed" ? "✗" : "–";
+      termLine(`<span class="r">${mark}</span> ${escHTML(data.repo)} ${escHTML(data.status)}${data.message ? " — " + escHTML(data.message.split("\n")[0].slice(0,80)) : ""}`, cls);
+    }
+  };
+  es.onerror = () => {
+    retries++;
+    if (retries >= 3) {
+      es.close();
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      termLine(`<span class="r">✗</span> SSE connection lost — please refresh`, "fail");
+    }
+  };
+});
+
+function setCardStatus(name, status, message) {
+  const dot = document.getElementById(`dot-${cssId(name)}`);
+  if (dot) dot.className = "dot " + status;
+  const msg = document.getElementById(`msg-${cssId(name)}`);
+  if (msg && message) {
+    msg.textContent = message.split("\n")[0].slice(0, 60);
+    msg.classList.toggle("err", status === "failed");
+  }
+}
+
+/* ---------- confirm modal ---------- */
+let pendingAction = null;
+
+function askConfirm(title, body, cmd, onConfirm) {
+  $("#modalTitle").textContent = title;
+  $("#modalBody").textContent = body;
+  $("#modalCmd").textContent = cmd;
+  $("#modalOverlay").classList.add("show");
+  pendingAction = onConfirm;
+}
+function closeModal() { $("#modalOverlay").classList.remove("show"); pendingAction = null; }
+
+$("#modalCancel").addEventListener("click", closeModal);
+$("#modalOverlay").addEventListener("click", (e) => { if (e.target.id === "modalOverlay") closeModal(); });
+$("#modalConfirm").addEventListener("click", () => { const fn = pendingAction; closeModal(); if (fn) fn(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+/* ---------- per-card actions ---------- */
+document.addEventListener("click", async (e) => {
+  const actBtn = e.target.closest(".icon-btn[data-act]");
+  if (!actBtn) return;
+  const path = actBtn.dataset.path;
+  const act = actBtn.dataset.act;
+  // The display name comes from the in-memory repos array (kept in sync
+  // by loadRepos); the path is the canonical identifier on the wire.
+  const r = repos.find(x => x.path === path);
+  const name = r ? r.name : path;
+  if (act === "pull") { await singlePull(name, path, actBtn); }
+  else if (act === "stash") { await runAction(name, path, "stash"); }
+  else if (act === "discard") {
+    askConfirm(t("confirmDiscardTitle"), t("confirmDiscardBody", name), "git checkout -- . && git clean -fd", () => runAction(name, path, "discard"));
+  } else if (act === "checkout-main") {
+    askConfirm(t("confirmMainTitle"), t("confirmMainBody", name), "git checkout main", () => runAction(name, path, "checkout-main"));
+  } else if (act === "preview") {
+    await openDiff(name, path);
+  } else if (act === "vscode") {
+    await runAction(name, path, "open-vscode");
+  }
+});
+
+/* ---------- diff preview ---------- */
+function diffLineClass(line) {
+  if (line.startsWith("diff --git") || line.startsWith("index ")) return "d-meta";
+  if (line.startsWith("+++") || line.startsWith("---")) return "d-meta";
+  if (line.startsWith("@@")) { diffLineClass._inHunk = true; return "d-hunk"; }
+  if (diffLineClass._inHunk) {
+    if (line.startsWith("+")) return "d-add";
+    if (line.startsWith("-")) return "d-del";
+  }
+  return "";
+}
+
+async function openDiff(name, path) {
+  diffLineClass._inHunk = false;
+  $("#diffTitle").textContent = name;
+  $("#diffSub").textContent = t("diffLoading");
+  $("#diffUntracked").classList.remove("show");
+  $("#diffBody").innerHTML = `<div class="d-empty">${t("diffLoadingBody")}</div>`;
+  $("#diffOverlay").classList.add("show");
+
+  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/diff`);
+  if (!res.ok) {
+    $("#diffBody").innerHTML = `<div class="d-empty">${t("diffLoadFail")}</div>`;
+    $("#diffSub").textContent = "";
+    return;
+  }
+  const data = await res.json();
+  const lines = (data.diff || "").split("\n");
+  const changed = lines.filter(l => l.startsWith("+") || l.startsWith("-")).length -
+    lines.filter(l => l.startsWith("+++") || l.startsWith("---")).length;
+  $("#diffSub").textContent = data.diff ? t("diffChanged", changed) : "";
+
+  if (data.untracked && data.untracked.length) {
+    $("#diffUntracked").classList.add("show");
+    $("#diffUntracked").textContent = t("diffUntracked", data.untracked.length, data.untracked.join(", "));
+  }
+
+  if (!data.diff && !(data.untracked && data.untracked.length)) {
+    $("#diffBody").innerHTML = `<div class="d-empty">${t("diffEmpty")}</div>`;
+    return;
+  }
+  $("#diffBody").innerHTML = lines.map(line =>
+    `<div class="d-line ${diffLineClass(line)}">${escHTML(line) || "&nbsp;"}</div>`).join("");
+}
+
+$("#diffClose").addEventListener("click", () => $("#diffOverlay").classList.remove("show"));
+$("#diffOverlay").addEventListener("click", (e) => { if (e.target.id === "diffOverlay") $("#diffOverlay").classList.remove("show"); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#diffOverlay").classList.remove("show"); });
+
+async function runAction(name, path, action) {
+  termLine(`<span class="r">$</span> ${escHTML(name)}: ${action}`);
+  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/action`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  const data = await res.json();
+  termLine(`<span class="r">${data.ok ? "✓" : "✗"}</span> ${escHTML(data.output || (data.ok ? "done" : "failed"))}`, data.ok ? "ok" : "fail");
+  await loadRepos();
+}
+
+async function bulkRun(action, repoList) {
+  $("#terminal").classList.add("open");
+  document.body.classList.add("term-open");
+  // Each item carries both name (for the terminal) and path (for the URL).
+  await Promise.all(repoList.map(r => runAction(r.name, r.path, action)));
+}
+
+async function singlePull(name, path, btn) {
+  btn.disabled = true;
+  setCardStatus(name, "running");
+  termLine(`<span class="r">$</span> git -C ${escHTML(name)} pull --ff-only`);
+  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/action`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "pull" }),
+  });
+  const data = await res.json();
+  setCardStatus(name, data.ok ? "success" : "failed", data.output);
+  termLine(`<span class="r">${data.ok ? "✓" : "✗"}</span> ${escHTML(name)} ${escHTML(data.output || "")}`.slice(0, 200), data.ok ? "ok" : "fail");
+  btn.disabled = false;
+  await loadRepos();
+}
+
+/* ---------- settings modal ---------- */
+const FOLDER_ICON = `<svg class="fi" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>`;
+let browsePath = "~";
+
+function openSettings() {
+  $("#settingsOverlay").classList.add("show");
+  renderSettingsRoots();
+  loadBrowse(browsePath);
+}
+function closeSettings() { $("#settingsOverlay").classList.remove("show"); }
+
+$("#settingsBtn").addEventListener("click", openSettings);
+$("#settingsClose").addEventListener("click", closeSettings);
+$("#settingsOverlay").addEventListener("click", (e) => { if (e.target.id === "settingsOverlay") closeSettings(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#settingsOverlay").classList.contains("show")) closeSettings();
+});
+
+async function renderSettingsRoots() {
+  const res = await fetch("/api/roots");
+  const roots = await res.json();
+  $("#settingsRoots").innerHTML = roots.length ? roots.map(r => `
+    <div class="root-item">
+      ${FOLDER_ICON.replace('class="fi"', 'class="folder-icon"')}
+      <div class="info">
+        <div class="label">${escHTML(r.label)}</div>
+        <div class="path">${escHTML(r.path)}</div>
+      </div>
+      <button class="del-btn" data-path="${escAttr(r.path)}" title="Remove">&times;</button>
+    </div>
+  `).join("") : `<div class="browse-empty">No roots configured yet — add one below.</div>`;
+}
+
+$("#settingsRoots").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".del-btn");
+  if (!btn) return;
+  // Match by path (B-3) — the contract is symmetric with POST /api/roots.
+  await fetch(`/api/roots/${encodeURIComponent(btn.dataset.path)}`, { method: "DELETE" });
+  await renderSettingsRoots();
+  await loadRepos();
+});
+
+const BROWSE_QUICK = [{ name: "Home", path: "~" }, { name: "/", path: "/" }];
+$("#browseQuick").innerHTML = BROWSE_QUICK.map(q =>
+  `<button data-path="${escAttr(q.path)}">${escHTML(q.name)}</button>`).join("");
+$("#browseQuick").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-path]");
+  if (btn) loadBrowse(btn.dataset.path);
+});
+
+async function loadBrowse(path) {
+  const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+  const data = await res.json();
+  browsePath = data.path;
+  renderBrowsePath(data);
+  renderBrowseList(data);
+}
+
+function renderBrowsePath(data) {
+  const parts = data.path.split("/").filter(Boolean);
+  let acc = "";
+  const crumbs = parts.map((p, i) => {
+    acc += "/" + p;
+    if (i === parts.length - 1) return `<span class="current">${escHTML(p)}</span>`;
+    return `<span class="crumb" data-path="${escAttr(acc)}">${escHTML(p)}</span><span class="sep">/</span>`;
+  });
+  $("#browsePath").innerHTML = `<span class="crumb" data-path="/">/</span>${crumbs.join("")}`;
+}
+
+$("#browsePath").addEventListener("click", (e) => {
+  const crumb = e.target.closest(".crumb[data-path]");
+  if (crumb) loadBrowse(crumb.dataset.path);
+});
+
+function renderBrowseList(data) {
+  if (!data.dirs.length) {
+    $("#browseList").innerHTML = `<div class="browse-empty">No subdirectories</div>`;
+    return;
+  }
+  $("#browseList").innerHTML = data.dirs.map(d => `
+    <div class="browse-item" data-path="${escAttr(d.path)}">
+      ${FOLDER_ICON}
+      <span class="name">${escHTML(d.name)}</span>
+      <button class="select-btn" data-path="${escAttr(d.path)}" data-name="${escAttr(d.name)}">Add</button>
+    </div>
+  `).join("");
+}
+
+$("#browseList").addEventListener("click", async (e) => {
+  const selectBtn = e.target.closest(".select-btn");
+  if (selectBtn) {
+    e.stopPropagation();
+    await addRoot(selectBtn.dataset.path, selectBtn.dataset.name);
+    return;
+  }
+  const item = e.target.closest(".browse-item");
+  if (item) loadBrowse(item.dataset.path);
+});
+
+async function addRoot(path, label) {
+  const res = await fetch("/api/roots", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, label }),
+  });
+  if (res.ok) {
+    await renderSettingsRoots();
+    await loadRepos();
+  }
+}
+
+/* ---------- init ---------- */
+renderStatic();
+loadRepos();
+</script>
+</body>
+</html>
