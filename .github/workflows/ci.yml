@@ -36,3 +36,6 @@ jobs:
 
       - name: Run tests
         run: make test PYTHON=python
+
+      - name: Check coverage
+        run: make coverage PYTHON=python

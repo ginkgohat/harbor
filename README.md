@@ -110,6 +110,21 @@ Roots passed on the command line (`harbor ~/work ~/oss`) are persisted into
 the config file on startup, so Rescan and later runs keep using them. Roots
 can also be added/removed from the Settings panel in the UI.
 
+## Troubleshooting
+
+### "Port 8765 is already in use"
+
+If another process is already listening on the default port, you'll see a
+friendly error with two options:
+
+```bash
+# Use a different port
+harbor --port 8766
+
+# Find and stop the process using port 8765
+lsof -i :8765
+```
+
 ## Security model
 
 Harbor binds to `127.0.0.1` only and has **no authentication** — anyone with
