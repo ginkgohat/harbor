@@ -276,13 +276,22 @@ docs: update contributing guide with setup steps
    make test
    ```
 
-4. **Push to your fork**:
+4. **Check coverage** — new code should maintain or improve test coverage:
+
+   ```bash
+   make coverage
+   ```
+
+   The project enforces a minimum coverage threshold (see `fail_under` in
+   `pyproject.toml`). CI will fail if total coverage drops below it.
+
+5. **Push to your fork**:
 
    ```bash
    git push origin my-feature-branch
    ```
 
-5. **Open a Pull Request** on GitHub. Fill out the PR template (if one exists) and describe what you changed and why.
+6. **Open a Pull Request** on GitHub. Fill out the PR template (if one exists) and describe what you changed and why.
 
 ### What happens next?
 
@@ -296,6 +305,7 @@ Before submitting your PR, make sure:
 
 - [ ] All existing tests pass (`make test`)
 - [ ] New features include tests where appropriate
+- [ ] Test coverage does not drop below the threshold (`make coverage`)
 - [ ] Documentation is updated (README, docstrings, etc.)
 - [ ] The code follows the project's style conventions
 - [ ] Your branch is up to date with `main`
