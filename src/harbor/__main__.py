@@ -125,7 +125,19 @@ def main():
     Handler.cli_min_depth = args.min_depth
     Handler.cli_max_depth = args.max_depth
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        if e.errno == 48 or "Address already in use" in str(e):
+            logger.error(
+                "Port %d is already in use by another process.\n"
+                "  → Try a different port with:  harbor --port <number>\n"
+                "  → Or find and stop the process using port %d:\n"
+                "       lsof -i :%d",
+                port, port, port,
+            )
+            sys.exit(1)
+        raise
     url = f"http://127.0.0.1:{port}"
     logger.info("serving at %s", url)
 
