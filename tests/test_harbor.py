@@ -4,10 +4,15 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
+
+from harbor.__main__ import _create_server
 from harbor.config import _toml_str, load_config, resolve_roots, save_config
 from harbor.git import do_action, repo_status, run_git
 from harbor.scanner import find_repos, scan_roots
+from harbor.server import Handler
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -335,11 +340,6 @@ def test_resolve_roots_fallback():
 # ---------------------------------------------------------------------------
 # __main__ — port-in-use error handling
 # ---------------------------------------------------------------------------
-
-import pytest
-from unittest.mock import patch
-from harbor.__main__ import _create_server
-from harbor.server import Handler
 
 
 def test_create_server_port_in_use_exits_with_friendly_message(caplog):
