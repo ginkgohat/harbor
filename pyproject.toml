@@ -29,7 +29,7 @@ Repository = "https://github.com/ginkgohat/harbor"
 harbor = "harbor.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-timeout", "ruff", "pytest-cov"]
+dev = ["pytest>=7", "pytest-timeout", "ruff", "pytest-cov", "build>=1", "twine"]
 
 [build-system]
 requires = ["setuptools>=64"]
