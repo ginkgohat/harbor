@@ -749,6 +749,26 @@ function needsAttention(r) {
   return r.dirty || r.detached || !r.is_main || (r.behind && r.behind > 0);
 }
 
+/* ---------- visibility-aware polling ---------- */
+const POLL_INTERVAL = 30000; // refresh status every 30s while the tab is visible
+let pollTimer = null;
+let pullJobActive = false;   // skip polling while a batch job is running
+
+function startPolling() {
+  if (pollTimer) return;
+  loadRepos(); // refresh immediately when switching back to the tab
+  pollTimer = setInterval(() => { if (!pullJobActive) loadRepos(); }, POLL_INTERVAL);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") startPolling();
+  else stopPolling();
+});
+
 async function loadRepos() {
   try {
     const res = await fetch("/api/repos", { signal: AbortSignal.timeout(15000) });
@@ -961,6 +981,7 @@ $("#pullAllBtn").addEventListener("click", async () => {
 
   const res = await fetch("/api/pull-all", { method: "POST" });
   const { job_id } = await res.json();
+  pullJobActive = true;
   const total = repos.length;
   let done = 0;
 
@@ -971,6 +992,7 @@ $("#pullAllBtn").addEventListener("click", async () => {
     const data = JSON.parse(ev.data);
     if (data.done) {
       es.close();
+      pullJobActive = false;
       btn.disabled = false;
       btn.classList.remove("busy");
       $("#progressFill").style.width = "100%";
@@ -998,6 +1020,7 @@ $("#pullAllBtn").addEventListener("click", async () => {
     retries++;
     if (retries >= 3) {
       es.close();
+      pullJobActive = false;
       btn.disabled = false;
       btn.classList.remove("busy");
       termLine(`<span class="r">✗</span> SSE connection lost — please refresh`, "fail");
