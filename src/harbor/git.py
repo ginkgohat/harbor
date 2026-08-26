@@ -3,14 +3,32 @@
 import logging
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
+# Default per-command timeout for status/diff/ref queries.  Generous enough
+# for large repos, but prevents one hung git process (dead network mount,
+# iCloud placeholder file, credential prompt, index.lock contention) from
+# blocking an API request forever.
+GIT_TIMEOUT = 10
+# Network operations (git pull) may legitimately take longer on slow links.
+PULL_TIMEOUT = 120
 
-def run_git(path, *args):
-    """Execute a git command in *path* and return (returncode, stdout, stderr)."""
+
+def run_git(path, *args, timeout=GIT_TIMEOUT):
+    """Execute a git command in *path* and return (returncode, stdout, stderr).
+
+    Returns ``rc=None`` when the command times out — callers treat any
+    non-zero rc as failure, so a timeout degrades to a safe conservative
+    result instead of hanging the request.
+    """
     cmd = ["git", "-C", path, *args]
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning("git command timed out after %ss: %s", timeout, " ".join(cmd))
+        return None, "", f"timed out after {timeout}s"
     return p.returncode, p.stdout, p.stderr
 
 
@@ -50,9 +68,19 @@ def repo_status(repo):
     }
 
 
+STATUS_WORKERS = 8
+
+
 def get_repos_status(repos):
-    """Return status for every repo in *repos*."""
-    return [repo_status(r) for r in repos.values()]
+    """Return status for every repo in *repos*, collected concurrently.
+
+    Each repo runs several git subprocesses; running them in a thread pool
+    cuts total refresh latency roughly by the worker count and keeps one
+    slow repo from extending the tail linearly.
+    """
+    with ThreadPoolExecutor(max_workers=STATUS_WORKERS) as ex:
+        # map() preserves input order, matching the previous serial output.
+        return list(ex.map(repo_status, repos.values()))
 
 
 def pull_one(repo, q):
@@ -74,7 +102,7 @@ def pull_one(repo, q):
         q.put({"repo": name, "status": "skipped", "message": "detached HEAD"})
         return
 
-    rc, out, err = run_git(path, "pull", "--ff-only")
+    rc, out, err = run_git(path, "pull", "--ff-only", timeout=PULL_TIMEOUT)
     if rc == 0:
         q.put({"repo": name, "status": "success", "message": (out.strip() or "already up to date")})
     else:
@@ -108,7 +136,7 @@ def do_action(path, action, repos):
         _, branch_out, _ = run_git(repo_path, "symbolic-ref", "--short", "-q", "HEAD")
         if branch_out.strip() == "":
             return 200, {"ok": False, "output": "skipped: detached HEAD"}
-        rc, out, err = run_git(repo_path, "pull", "--ff-only")
+        rc, out, err = run_git(repo_path, "pull", "--ff-only", timeout=PULL_TIMEOUT)
     elif action == "stash":
         rc, out, err = run_git(repo_path, "stash", "push", "-u", "-m", "harbor")
     elif action == "discard":
