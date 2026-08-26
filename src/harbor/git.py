@@ -1,6 +1,8 @@
 """Git operations — thin wrappers around the ``git`` CLI."""
 
 import logging
+import os
+import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +18,21 @@ GIT_TIMEOUT = 10
 PULL_TIMEOUT = 120
 
 
+def _git_env():
+    """Environment for git subprocesses with interactive prompts disabled.
+
+    Harbor has no TTY, so a credential prompt (HTTPS askpass, Git Credential
+    Manager, ...) can only hang until the command timeout.  Failing fast is
+    strictly better.  ``GIT_TERMINAL_PROMPT=0`` is git's official switch;
+    ``GCM_INTERACTIVE=never`` covers Git Credential Manager (Windows) on a
+    best-effort basis.
+    """
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    return env
+
+
 def run_git(path, *args, timeout=GIT_TIMEOUT):
     """Execute a git command in *path* and return (returncode, stdout, stderr).
 
@@ -25,46 +42,83 @@ def run_git(path, *args, timeout=GIT_TIMEOUT):
     """
     cmd = ["git", "-C", path, *args]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=_git_env())
     except subprocess.TimeoutExpired:
         logger.warning("git command timed out after %ss: %s", timeout, " ".join(cmd))
         return None, "", f"timed out after {timeout}s"
     return p.returncode, p.stdout, p.stderr
 
 
+def parse_porcelain_v2(text):
+    """Parse ``git status --porcelain=v2 --branch`` output into a status dict.
+
+    Pure function (no I/O) so every branch shape can be unit-tested:
+      - normal branch: ``# branch.head <name>``, optionally ``# branch.ab +A -B``
+      - unborn branch (empty repo): ``# branch.oid (initial)``, no ``branch.ab``
+      - detached HEAD: ``# branch.head (detached)``
+      - no upstream: no ``# branch.ab`` line at all
+
+    ``dirty`` counts tracked changes only (ordinary ``1 ``, rename ``2 ``,
+    unmerged ``u `` entries).  Untracked (``? ``) and ignored (``! ``)
+    entries do NOT make a repo dirty — same semantics as the previous
+    ``git diff --quiet`` based implementation.
+    """
+    branch = ""
+    detached = False
+    ahead = behind = None
+    dirty = False
+
+    for line in text.splitlines():
+        if line.startswith("# branch.head "):
+            head = line[len("# branch.head "):]
+            if head == "(detached)":
+                detached = True
+            else:
+                branch = head
+        elif line.startswith("# branch.ab "):
+            m = re.match(r"# branch\.ab \+(\d+) -(\d+)", line)
+            if m:
+                ahead, behind = int(m.group(1)), int(m.group(2))
+        elif line[:2] in ("1 ", "2 ", "u "):
+            dirty = True
+
+    return {"branch": branch, "detached": detached, "ahead": ahead, "behind": behind, "dirty": dirty}
+
+
 def repo_status(repo):
-    """Return a dict describing the current state of *repo*."""
+    """Return a dict describing the current state of *repo*.
+
+    All per-repo facts come from a single ``git status --porcelain=v2
+    --branch`` subprocess, replacing the previous 4–6 subprocess calls per
+    repo.  A failed command degrades to the same conservative answer as
+    before (dirty + detached), so a broken repo still surfaces as needing
+    attention instead of looking healthy.
+    """
     path = repo["path"]
 
-    rc_u, _, _ = run_git(path, "diff", "--quiet")
-    rc_s, _, _ = run_git(path, "diff", "--cached", "--quiet")
-    dirty = rc_u != 0 or rc_s != 0
+    rc, out, _ = run_git(path, "status", "--porcelain=v2", "--branch")
+    if rc == 0:
+        parsed = parse_porcelain_v2(out)
+    else:
+        parsed = {"branch": "", "detached": True, "ahead": None, "behind": None, "dirty": True}
 
-    _, branch_out, _ = run_git(path, "symbolic-ref", "--short", "-q", "HEAD")
-    branch = branch_out.strip()
-    detached = branch == ""
-    is_main = branch == _default_branch(path)
-
-    ahead = behind = None
-    if not detached:
-        rc, out, _ = run_git(
-            path, "rev-list", "--left-right", "--count", f"{branch}...{branch}@{{u}}"
-        )
-        if rc == 0:
-            parts = out.strip().split()
-            if len(parts) == 2:
-                ahead, behind = int(parts[0]), int(parts[1])
-
+    branch = parsed["branch"]
+    # T-021: scan_roots caches the probe result on the repo record; fall back
+    # to a live probe for records built by other paths (tests, actions).
+    if "default_branch" in repo:
+        default = repo["default_branch"]
+    else:
+        default = _default_branch(path)
     return {
         "name": repo["name"],
         "path": repo["path"],
         "root_label": repo.get("root_label"),
         "branch": branch,
-        "dirty": dirty,
-        "detached": detached,
-        "is_main": is_main,
-        "ahead": ahead,
-        "behind": behind,
+        "dirty": parsed["dirty"],
+        "detached": parsed["detached"],
+        "is_main": bool(branch) and branch == default,
+        "ahead": parsed["ahead"],
+        "behind": parsed["behind"],
     }
 
 
@@ -109,8 +163,18 @@ def pull_one(repo, q):
         q.put({"repo": name, "status": "failed", "message": (out + err).strip()})
 
 
+# Diff payloads go straight into memory and the DOM; cap them so a
+# lockfile-scale diff can't freeze the page (T-041).
+MAX_DIFF_BYTES = 512 * 1024
+
+
 def get_diff(path, repos):
-    """Return tracked diff and untracked files for a repo."""
+    """Return tracked diff and untracked files for a repo.
+
+    The tracked diff is truncated at MAX_DIFF_BYTES (cut at a line boundary)
+    with ``truncated: True`` so the frontend can show a notice instead of
+    choking on the full payload.
+    """
     repo = repos.get(path)
     if not repo:
         return None
@@ -118,7 +182,14 @@ def get_diff(path, repos):
     _, tracked_diff, _ = run_git(repo_path, "diff", "HEAD", "--", ".")
     _, status_out, _ = run_git(repo_path, "status", "--porcelain")
     untracked = [line[3:] for line in status_out.splitlines() if line.startswith("??")]
-    return {"diff": tracked_diff, "untracked": untracked}
+    truncated = False
+    encoded = tracked_diff.encode("utf-8", errors="replace")
+    if len(encoded) > MAX_DIFF_BYTES:
+        # decode with errors="ignore" in case the byte cut split a UTF-8 char
+        cut = encoded[:MAX_DIFF_BYTES].decode("utf-8", errors="ignore")
+        tracked_diff = cut[: cut.rfind("\n") + 1] or cut
+        truncated = True
+    return {"diff": tracked_diff, "untracked": untracked, "truncated": truncated}
 
 
 def do_action(path, action, repos):

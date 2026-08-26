@@ -215,6 +215,7 @@ body.term-open main { padding-bottom: 260px; }
   .tag.dirty { color: var(--warning); background: var(--warning-soft); }
   .tag.detached { color: var(--danger); background: var(--danger-soft); }
   .tag.behind { color: var(--accent); background: var(--accent-soft); }
+  .tag.ahead { color: var(--success); background: var(--success-soft); }
   .tag.root { color: var(--muted); background: var(--seg-bg); font-family: var(--mono); font-size: 10px; }
 
   /* ---------- root group ---------- */
@@ -498,7 +499,7 @@ body.term-open main { padding-bottom: 260px; }
         <button data-view="all"></button>
       </div>
       <div class="segmented" id="rootFilter" style="display:none">
-        <button class="on" data-root="">全部</button>
+        <button class="on" data-root=""></button>
       </div>
       <div class="segmented" id="langToggle">
         <button class="on" data-lang="zh">中</button>
@@ -523,7 +524,7 @@ body.term-open main { padding-bottom: 260px; }
 <main>
   <div id="attentionSection">
     <div class="section-head">
-      <div class="section-label" id="attentionLabel">待处理</div>
+      <div class="section-label" id="attentionLabel"></div>
       <div class="batch-actions" id="batchActions"></div>
     </div>
     <div class="grid" id="attentionGrid"></div>
@@ -555,7 +556,7 @@ body.term-open main { padding-bottom: 260px; }
   <div id="diffModal">
     <div id="diffHead">
       <div class="title">
-        <h3 id="diffTitle">改动预览</h3>
+        <h3 id="diffTitle"></h3>
         <span class="sub" id="diffSub"></span>
       </div>
       <button id="diffClose">
@@ -570,7 +571,7 @@ body.term-open main { padding-bottom: 260px; }
 <div id="settingsOverlay">
   <div id="settingsModal">
     <div id="settingsHead">
-      <h3>Repositories</h3>
+      <h3 id="settingsTitle"></h3>
       <button id="settingsClose">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
@@ -578,7 +579,7 @@ body.term-open main { padding-bottom: 260px; }
     <div id="settingsBody">
       <div id="settingsRoots"></div>
       <div class="browse-section">
-        <div class="browse-label">Add directory</div>
+        <div class="browse-label" id="browseLabel"></div>
         <div class="browse-quick" id="browseQuick"></div>
         <div class="browse-path" id="browsePath"></div>
         <div class="browse-list" id="browseList"></div>
@@ -619,6 +620,7 @@ const STR = {
     emptyOk: "✓ 一切正常，没有需要处理的 repo",
     tagDirty: "改动未提交", tagDetached: "detached",
     tagBehind: (n) => `落后 ${n}`,
+    tagAhead: (n) => `领先 ${n}`,
     btnPull: "Pull", btnStash: "Stash", btnDiscard: "丢弃", btnMain: "main", btnPreview: "预览", btnVscode: "VSCode",
     refreshTip: "刷新配置",
     refreshDone: (n) => `已刷新 · ${n} 个 repo`,
@@ -638,10 +640,16 @@ const STR = {
     diffChanged: (n) => `${n} 行改动`,
     diffUntracked: (n, files) => `+ ${n} 个新文件（未跟踪）：${files}`,
     diffEmpty: "没有可显示的改动",
+    diffTruncated: "⚠️ diff 过大，服务端已截断（仅前 512KB）",
+    diffTooManyLines: (n) => `⚠️ 行数过多，仅渲染前 ${n} 行`,
     connError: "⚠️ 无法连接后端服务 —— 请确认 harbor 正在运行",
     connTimeout: "⚠️ 请求超时 —— 某个仓库的 git 命令可能卡住了",
     retry: "重试",
     connFailed: "连接失败",
+    settingsTitle: "仓库", addDirectory: "添加目录",
+    noRoots: "还没有配置目录 —— 在下方添加",
+    noSubdirs: "没有子目录",
+    addBtn: "添加", removeTip: "移除",
   },
   en: {
     searchPh: "Filter repos…",
@@ -652,6 +660,7 @@ const STR = {
     emptyOk: "✓ All clear — nothing needs attention",
     tagDirty: "uncommitted", tagDetached: "detached",
     tagBehind: (n) => `${n} behind`,
+    tagAhead: (n) => `${n} ahead`,
     btnPull: "Pull", btnStash: "Stash", btnDiscard: "Discard", btnMain: "main", btnPreview: "Preview", btnVscode: "VSCode",
     refreshTip: "Refresh config",
     refreshDone: (n) => `Refreshed · ${n} repos`,
@@ -671,10 +680,16 @@ const STR = {
     diffChanged: (n) => `${n} lines changed`,
     diffUntracked: (n, files) => `+ ${n} untracked file(s): ${files}`,
     diffEmpty: "No changes to show",
+    diffTruncated: "⚠️ Diff too large — truncated server-side to the first 512KB",
+    diffTooManyLines: (n) => `⚠️ Too many lines — only the first ${n} are rendered`,
     connError: "⚠️ Cannot connect to backend — make sure harbor is running",
     connTimeout: "⚠️ Request timed out — a repo's git command may be stuck",
     retry: "Retry",
     connFailed: "Connection failed",
+    settingsTitle: "Repositories", addDirectory: "Add directory",
+    noRoots: "No roots configured yet — add one below.",
+    noSubdirs: "No subdirectories",
+    addBtn: "Add", removeTip: "Remove",
   },
 };
 
@@ -707,6 +722,10 @@ function renderStatic() {
   $("#modalCancel").textContent = t("cancelBtn");
   $("#termTitle").textContent = t("termTitle");
   $("#termClear").textContent = t("termClear");
+  $("#attentionLabel").textContent = t("sectionAttention");
+  $('#rootFilter button[data-root=""]').textContent = t("segAll");
+  $("#settingsTitle").textContent = t("settingsTitle");
+  $("#browseLabel").textContent = t("addDirectory");
 }
 
 $("#langToggle").addEventListener("click", (e) => {
@@ -746,7 +765,8 @@ $("#refreshBtn").addEventListener("click", async () => {
 
 
 function needsAttention(r) {
-  return r.dirty || r.detached || !r.is_main || (r.behind && r.behind > 0);
+  // ahead > 0 means "forgot to push" — as much a pain point as behind.
+  return r.dirty || r.detached || !r.is_main || (r.behind ?? 0) > 0 || (r.ahead ?? 0) > 0;
 }
 
 /* ---------- visibility-aware polling ---------- */
@@ -811,7 +831,7 @@ function render() {
   if (multiRoot) {
     $("#rootFilter").style.display = "flex";
     $("#rootFilter").innerHTML = `
-      <button class="${rootFilter === '' ? 'on' : ''}" data-root="">全部</button>
+      <button class="${rootFilter === '' ? 'on' : ''}" data-root="">${t("segAll")}</button>
       ${rootLabels.map(rl =>
         `<button class="${rootFilter === rl ? 'on' : ''}" data-root="${escAttr(rl)}">${escHTML(rl)}</button>`
       ).join("")}
@@ -911,6 +931,7 @@ function cardHTML(r) {
       ${r.dirty ? `<span class="tag dirty">${t("tagDirty")}</span>` : ""}
       ${r.detached ? `<span class="tag detached">${t("tagDetached")}</span>` : ""}
       ${(r.behind ?? 0) > 0 ? `<span class="tag behind">${t("tagBehind", r.behind)}</span>` : ""}
+      ${(r.ahead ?? 0) > 0 ? `<span class="tag ahead">${t("tagAhead", r.ahead)}</span>` : ""}
     </div>
     <div class="card-msg" id="msg-${id}"></div>
     <div class="card-actions">
@@ -1056,6 +1077,14 @@ $("#modalConfirm").addEventListener("click", () => { const fn = pendingAction; c
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 
 /* ---------- per-card actions ---------- */
+// T-022: apply a single repo's fresh status (returned by the action
+// endpoint) without a full /api/repos reload.
+function applyStatus(s) {
+  const i = repos.findIndex(x => x.path === s.path);
+  if (i >= 0) repos[i] = s;
+  render();
+}
+
 document.addEventListener("click", async (e) => {
   const actBtn = e.target.closest(".icon-btn[data-act]");
   if (!actBtn) return;
@@ -1079,6 +1108,10 @@ document.addEventListener("click", async (e) => {
 });
 
 /* ---------- diff preview ---------- */
+// Rendering thousands of DOM nodes freezes the page; cap the line count.
+// (The server additionally truncates the payload itself — T-041.)
+const MAX_DIFF_LINES = 5000;
+
 function diffLineClass(line) {
   if (line.startsWith("diff --git") || line.startsWith("index ")) return "d-meta";
   if (line.startsWith("+++") || line.startsWith("---")) return "d-meta";
@@ -1105,7 +1138,9 @@ async function openDiff(name, path) {
     return;
   }
   const data = await res.json();
-  const lines = (data.diff || "").split("\n");
+  const allLines = (data.diff || "").split("\n");
+  const tooMany = allLines.length > MAX_DIFF_LINES;
+  const lines = tooMany ? allLines.slice(0, MAX_DIFF_LINES) : allLines;
   const changed = lines.filter(l => l.startsWith("+") || l.startsWith("-")).length -
     lines.filter(l => l.startsWith("+++") || l.startsWith("---")).length;
   $("#diffSub").textContent = data.diff ? t("diffChanged", changed) : "";
@@ -1119,7 +1154,11 @@ async function openDiff(name, path) {
     $("#diffBody").innerHTML = `<div class="d-empty">${t("diffEmpty")}</div>`;
     return;
   }
-  $("#diffBody").innerHTML = lines.map(line =>
+  const notices = [];
+  if (data.truncated) notices.push(t("diffTruncated"));
+  if (tooMany) notices.push(t("diffTooManyLines", MAX_DIFF_LINES));
+  const noticeHtml = notices.map(n => `<div class="d-line d-hunk">${escHTML(n)}</div>`).join("");
+  $("#diffBody").innerHTML = noticeHtml + lines.map(line =>
     `<div class="d-line ${diffLineClass(line)}">${escHTML(line) || "&nbsp;"}</div>`).join("");
 }
 
@@ -1135,7 +1174,8 @@ async function runAction(name, path, action) {
   });
   const data = await res.json();
   termLine(`<span class="r">${data.ok ? "✓" : "✗"}</span> ${escHTML(data.output || (data.ok ? "done" : "failed"))}`, data.ok ? "ok" : "fail");
-  await loadRepos();
+  if (data.status) applyStatus(data.status);
+  else await loadRepos();
 }
 
 async function bulkRun(action, repoList) {
@@ -1157,7 +1197,8 @@ async function singlePull(name, path, btn) {
   setCardStatus(name, data.ok ? "success" : "failed", data.output);
   termLine(`<span class="r">${data.ok ? "✓" : "✗"}</span> ${escHTML(name)} ${escHTML(data.output || "")}`.slice(0, 200), data.ok ? "ok" : "fail");
   btn.disabled = false;
-  await loadRepos();
+  if (data.status) applyStatus(data.status);
+  else await loadRepos();
 }
 
 /* ---------- settings modal ---------- */
@@ -1188,9 +1229,9 @@ async function renderSettingsRoots() {
         <div class="label">${escHTML(r.label)}</div>
         <div class="path">${escHTML(r.path)}</div>
       </div>
-      <button class="del-btn" data-path="${escAttr(r.path)}" title="Remove">&times;</button>
+      <button class="del-btn" data-path="${escAttr(r.path)}" title="${escAttr(t("removeTip"))}">&times;</button>
     </div>
-  `).join("") : `<div class="browse-empty">No roots configured yet — add one below.</div>`;
+  `).join("") : `<div class="browse-empty">${t("noRoots")}</div>`;
 }
 
 $("#settingsRoots").addEventListener("click", async (e) => {
@@ -1236,14 +1277,14 @@ $("#browsePath").addEventListener("click", (e) => {
 
 function renderBrowseList(data) {
   if (!data.dirs.length) {
-    $("#browseList").innerHTML = `<div class="browse-empty">No subdirectories</div>`;
+    $("#browseList").innerHTML = `<div class="browse-empty">${t("noSubdirs")}</div>`;
     return;
   }
   $("#browseList").innerHTML = data.dirs.map(d => `
     <div class="browse-item" data-path="${escAttr(d.path)}">
       ${FOLDER_ICON}
       <span class="name">${escHTML(d.name)}</span>
-      <button class="select-btn" data-path="${escAttr(d.path)}" data-name="${escAttr(d.name)}">Add</button>
+      <button class="select-btn" data-path="${escAttr(d.path)}" data-name="${escAttr(d.name)}">${t("addBtn")}</button>
     </div>
   `).join("");
 }

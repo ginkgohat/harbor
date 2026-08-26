@@ -10,7 +10,7 @@ import pytest
 
 from harbor.__main__ import _create_server
 from harbor.config import _toml_str, load_config, resolve_roots, save_config
-from harbor.git import do_action, repo_status, run_git
+from harbor.git import do_action, parse_porcelain_v2, repo_status, run_git
 from harbor.scanner import find_repos, scan_roots
 from harbor.server import Handler
 
@@ -133,6 +133,69 @@ def test_find_repos_nested_repos_at_different_levels(tmp_path):
     assert len(repos) == 3
 
 
+# ---------------------------------------------------------------------------
+# T-001 / T-080 — worktree .git file detection + broken pointer skipping
+# ---------------------------------------------------------------------------
+
+def test_find_repos_worktree(tmp_path):
+    """A repo where .git is a file (worktree / submodule) is discovered."""
+    main = tmp_path / "main"
+    init_repo(main)
+    # Simulate a worktree: .git is a file pointing to a real gitdir
+    wt = tmp_path / "worktree-repo"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {main / '.git'}\n")
+    repos = find_repos(str(tmp_path), min_depth=1, max_depth=2)
+    names = [r["name"] for r in repos]
+    assert "worktree-repo" in names
+
+
+def test_find_repos_git_file_absolute_target(tmp_path):
+    """A .git file with an absolute gitdir: path resolves correctly."""
+    main = tmp_path / "main"
+    init_repo(main)
+    # Absolute target
+    wt = tmp_path / "abs-wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {main.resolve() / '.git'}\n")
+    repos = find_repos(str(tmp_path), min_depth=1, max_depth=2)
+    names = [r["name"] for r in repos]
+    assert "abs-wt" in names
+
+
+def test_find_repos_git_file_relative_target(tmp_path):
+    """A .git file with a relative gitdir: path resolves relative to the file."""
+    main = tmp_path / "main"
+    init_repo(main)
+    wt = tmp_path / "rel-wt"
+    wt.mkdir()
+    # Relative target from the .git file's directory
+    (wt / ".git").write_text("gitdir: ../main/.git\n")
+    repos = find_repos(str(tmp_path), min_depth=1, max_depth=2)
+    names = [r["name"] for r in repos]
+    assert "rel-wt" in names
+
+
+def test_find_repos_broken_git_file_skipped(tmp_path):
+    """A .git file whose gitdir target does not exist is NOT collected (T-080)."""
+    d = tmp_path / "broken"
+    d.mkdir()
+    (d / ".git").write_text("gitdir: /nonexistent/path/.git\n")
+    repos = find_repos(str(tmp_path), min_depth=1, max_depth=2)
+    names = [r["name"] for r in repos]
+    assert "broken" not in names
+
+
+def test_find_repos_malformed_git_file_skipped(tmp_path):
+    """A .git file with no valid gitdir: line is skipped gracefully."""
+    d = tmp_path / "malformed"
+    d.mkdir()
+    (d / ".git").write_text("not a gitdir pointer at all\n")
+    repos = find_repos(str(tmp_path), min_depth=1, max_depth=2)
+    names = [r["name"] for r in repos]
+    assert "malformed" not in names
+
+
 
 def test_scan_roots_multiple(tmp_path):
     d1 = tmp_path / "work"
@@ -167,6 +230,137 @@ def test_scan_roots_dedup(tmp_path):
     assert p2 in repos
     assert repos[p1]["root_label"] == "A"
     assert repos[p2]["root_label"] == "B"
+
+
+# ---------------------------------------------------------------------------
+# T-021 — scan_roots caches default_branch on each repo record
+# ---------------------------------------------------------------------------
+
+def test_scan_roots_caches_default_branch(tmp_path):
+    d = tmp_path / "work"
+    init_repo(d / "project-a")
+    init_repo(d / "project-b")
+    repos = scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+    for repo in repos.values():
+        assert "default_branch" in repo
+        assert repo["default_branch"] == "main"
+
+
+def test_repo_status_uses_cached_default_branch(tmp_path):
+    init_repo(tmp_path / "r")
+    repo = {
+        "name": "r",
+        "path": str(tmp_path / "r"),
+        "default_branch": "main",
+    }
+    status = repo_status(repo)
+    assert status["is_main"] is True
+    # Cached value is used even if it's non-standard
+    repo["default_branch"] = "trunk"
+    status2 = repo_status(repo)
+    # Branch is actually "main", cached default is "trunk" → is_main False
+    assert status2["is_main"] is False
+
+
+def test_repo_status_cached_default_branch_miss(tmp_path):
+    """If default_branch is not in the record, repo_status probes live."""
+    init_repo(tmp_path / "r")
+    repo = {"name": "r", "path": str(tmp_path / "r")}
+    status = repo_status(repo)
+    assert status["is_main"] is True
+
+
+# ---------------------------------------------------------------------------
+# T-020 — parse_porcelain_v2 parser unit tests
+# ---------------------------------------------------------------------------
+
+def test_parse_porcelain_v2_normal_branch_with_upstream():
+    text = (
+        "# branch.oid abc123\n"
+        "# branch.head main\n"
+        "# branch.upstream origin/main\n"
+        "# branch.ab +2 -3\n"
+        "1 .M N... 100644 100644 100644 abc def file.py\n"
+    )
+    r = parse_porcelain_v2(text)
+    assert r["branch"] == "main"
+    assert r["detached"] is False
+    assert r["ahead"] == 2
+    assert r["behind"] == 3
+    assert r["dirty"] is True
+
+
+def test_parse_porcelain_v2_unborn_branch():
+    """Empty repo: oid is (initial), no branch.ab line."""
+    text = "# branch.oid (initial)\n# branch.head main\n"
+    r = parse_porcelain_v2(text)
+    assert r["branch"] == "main"
+    assert r["detached"] is False
+    assert r["ahead"] is None
+    assert r["behind"] is None
+    assert r["dirty"] is False
+
+
+def test_parse_porcelain_v2_detached_head():
+    text = "# branch.oid abc123\n# branch.head (detached)\n"
+    r = parse_porcelain_v2(text)
+    assert r["branch"] == ""
+    assert r["detached"] is True
+    assert r["ahead"] is None
+    assert r["behind"] is None
+
+
+def test_parse_porcelain_v2_no_upstream():
+    """Normal branch but no upstream configured → no branch.ab line."""
+    text = "# branch.oid abc123\n# branch.head feature\n"
+    r = parse_porcelain_v2(text)
+    assert r["branch"] == "feature"
+    assert r["detached"] is False
+    assert r["ahead"] is None
+    assert r["behind"] is None
+
+
+def test_parse_porcelain_v2_dirty_variants():
+    """Dirty tracks 1, 2, and u entries; ? (untracked) does NOT make dirty."""
+    text = (
+        "1 .M N... 100644 100644 100644 a b tracked.py\n"
+        "? untracked.py\n"
+        "! ignored.py\n"
+    )
+    r = parse_porcelain_v2(text)
+    assert r["dirty"] is True
+
+    r2 = parse_porcelain_v2("? new.txt\n? another.txt\n")
+    assert r2["dirty"] is False
+
+
+def test_repo_status_parity_with_legacy(tmp_path):
+    """New porcelain=v2 implementation should match legacy semantics for
+    the key fields (branch, dirty, detached, is_main)."""
+    import subprocess
+    init_repo(tmp_path / "r")
+    repo = {"name": "r", "path": str(tmp_path / "r")}
+
+    # Clean state
+    status = repo_status(repo)
+    assert status["dirty"] is False
+    assert status["branch"] == "main"
+    assert status["detached"] is False
+    assert status["is_main"] is True
+
+    # Make it dirty
+    (tmp_path / "r" / "README.md").write_text("modified")
+    status = repo_status(repo)
+    assert status["dirty"] is True
+
+    # Detach HEAD
+    subprocess.run(
+        ["git", "-C", str(tmp_path / "r"), "checkout", "--detach"],
+        check=True, capture_output=True,
+    )
+    status = repo_status(repo)
+    assert status["detached"] is True
+    assert status["branch"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +472,63 @@ def test_run_git():
         rc, out, _ = run_git(d, "rev-parse", "--abbrev-ref", "HEAD")
         assert rc == 0
         assert out.strip() == "main"
+
+
+def test_run_git_disables_interactive_prompts():
+    """T-013: every git subprocess runs with GIT_TERMINAL_PROMPT=0."""
+    import subprocess
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as d:
+        init_repo(Path(d))
+        with patch("subprocess.run") as mock_run:
+            mock_result = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="main", stderr=""
+            )
+            mock_run.return_value = mock_result
+            run_git(d, "rev-parse", "--abbrev-ref", "HEAD")
+            # Verify env was passed with the prompt-disabling vars
+            call_kwargs = mock_run.call_args[1]
+            env = call_kwargs.get("env", {})
+            assert env.get("GIT_TERMINAL_PROMPT") == "0"
+            assert env.get("GCM_INTERACTIVE") == "never"
+
+
+# ---------------------------------------------------------------------------
+# T-041 — diff truncation
+# ---------------------------------------------------------------------------
+
+def _make_repo_with_big_diff(tmp_path):
+    init_repo(tmp_path / "r")
+    # Write a big file so the diff exceeds the cap
+    big = "x" * 100 + "\n"
+    (tmp_path / "r" / "big.txt").write_text(big * 6000)  # ~600KB
+    repos = {str(tmp_path / "r"): {"name": "r", "path": str(tmp_path / "r")}}
+    return repos
+
+
+def test_get_diff_small_not_truncated(tmp_path):
+    init_repo(tmp_path / "r")
+    # Modify a tracked file so `git diff HEAD` produces output
+    (tmp_path / "r" / "README.md").write_text("modified content\n")
+    repos = {str(tmp_path / "r"): {"name": "r", "path": str(tmp_path / "r")}}
+    from harbor.git import get_diff
+    result = get_diff(str(tmp_path / "r"), repos)
+    assert result is not None
+    assert result["truncated"] is False
+    assert "README.md" in result["diff"]
+
+
+def test_get_diff_truncates_large_diff(tmp_path):
+    from harbor.git import get_diff
+    init_repo(tmp_path / "r")
+    # Modify tracked README to be huge (exceeds 512KB)
+    big_line = "x" * 100 + "\n"
+    (tmp_path / "r" / "README.md").write_text(big_line * 6000)  # ~600KB diff
+    repos = {str(tmp_path / "r"): {"name": "r", "path": str(tmp_path / "r")}}
+    result = get_diff(str(tmp_path / "r"), repos)
+    assert result is not None
+    assert result["truncated"] is True
+    assert len(result["diff"].encode("utf-8")) <= 512 * 1024
 
 
 # ---------------------------------------------------------------------------
