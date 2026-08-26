@@ -89,7 +89,7 @@ def repo_status(repo):
     """Return a dict describing the current state of *repo*.
 
     All per-repo facts come from a single ``git status --porcelain=v2
-    --branch`` subprocess, replacing the previous 4–6 subprocess calls per
+    --branch`` subprocess, replacing the previous 4-6 subprocess calls per
     repo.  A failed command degrades to the same conservative answer as
     before (dirty + detached), so a broken repo still surfaces as needing
     attention instead of looking healthy.

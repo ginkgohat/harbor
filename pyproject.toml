@@ -15,6 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Version Control :: Git",
 ]
 dependencies = [
@@ -29,14 +30,15 @@ Repository = "https://github.com/ginkgohat/harbor"
 harbor = "harbor.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-timeout", "ruff", "pytest-cov", "build>=1", "twine"]
+dev = ["pytest>=7", "pytest-timeout", "ruff", "pytest-cov", "build>=1", "twine", "mypy", "pre-commit"]
 
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.dynamic]
-version = {attr = "harbor.__version__"}
+[tool.setuptools_scm]
+write_to = "src/harbor/_version.py"
+write_to_template = "__version__ = \"{version}\"\n"
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -61,11 +63,29 @@ select = [
     "W",   # pycodestyle warnings
     "I",   # isort
     "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific rules
+    "C4",  # flake8-comprehensions
 ]
 ignore = [
     "E501",  # line too long — handled by formatter / too noisy for stdlib style
     "B008",  # do not perform function calls in argument defaults — common in argparse
 ]
+
+[tool.ruff.lint.flake8-unused-arguments]
+ignore-variadic-names = true
+
+[tool.mypy]
+python_version = "3.9"
+files = ["src/harbor"]
+ignore_missing_imports = true
+strict = false
+warn_unused_ignores = false
+warn_return_any = false
+disallow_untyped_defs = false
+check_untyped_defs = false
+# Progressive type-checking: start permissive, tighten over time as coverage improves.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

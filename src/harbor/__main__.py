@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import http.server
 import logging
 import os
@@ -162,10 +163,8 @@ def main():
 
 def _try_open_browser(url):
     """Open the browser, swallowing any error (e.g. headless environments)."""
-    try:
+    with contextlib.suppress(Exception):
         webbrowser.open(url)
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":

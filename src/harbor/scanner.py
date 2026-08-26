@@ -107,7 +107,7 @@ def scan_roots(roots, min_depth=1, max_depth=5):
             # (realpath collision), the first root wins — same as before.
             all_repos.setdefault(repo["path"], repo)
     # T-021: the default branch virtually never changes, so probe it once per
-    # scan instead of on every status refresh (saves 1–6 subprocesses per repo
+    # scan instead of on every status refresh (saves 1-6 subprocesses per repo
     # per refresh).  Computed after dedup so duplicate paths aren't probed twice.
     for repo in all_repos.values():
         repo["default_branch"] = git_ops._default_branch(repo["path"])
