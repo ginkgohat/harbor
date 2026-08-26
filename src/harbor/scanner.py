@@ -3,14 +3,38 @@
 import logging
 import os
 
+from . import git as git_ops
+
 logger = logging.getLogger(__name__)
 
 
-def find_repos(root, min_depth=1, max_depth=5, label=None):
-    """Walk *root* and return every directory that contains a .git subdir.
+def _git_file_target_exists(git_file):
+    """Validate a ``.git`` *file* (worktree / submodule pointer).
 
-    Uses `os.walk` for cross-platform compatibility (Linux, macOS, Windows).
-    Directories are pruned once we exceed *max_depth*.
+    Returns True only if the file holds a ``gitdir:`` line whose target
+    directory still exists.  A dangling pointer means the git dir was
+    removed — collecting it would surface a forever-detached ghost card.
+    """
+    try:
+        with open(git_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("gitdir:"):
+                    target = line.split(":", 1)[1].strip()
+                    if not os.path.isabs(target):
+                        target = os.path.join(os.path.dirname(git_file), target)
+                    return os.path.isdir(target)
+    except OSError:
+        pass
+    return False
+
+
+def find_repos(root, min_depth=1, max_depth=5, label=None):
+    """Walk *root* and return every directory that contains a .git marker.
+
+    The marker is either a ``.git`` subdirectory (normal repo) or a ``.git``
+    file (worktree / submodule ``gitdir:`` pointer, validated to still
+    resolve).  Uses `os.walk` for cross-platform compatibility (Linux,
+    macOS, Windows).  Directories are pruned once we exceed *max_depth*.
 
     The root directory itself is always checked (depth 0), so pointing Harbor
     directly at a repo works.  Subdirectories from depth 1 up to *max_depth*
@@ -45,7 +69,10 @@ def find_repos(root, min_depth=1, max_depth=5, label=None):
             dirnames.clear()
             continue
 
-        if ".git" in dirnames:
+        if ".git" in dirnames or (
+            ".git" in _filenames
+            and _git_file_target_exists(os.path.join(dirpath, ".git"))
+        ):
             raw_name = rel if rel != "." else os.path.basename(root)
             # Normalize path separators to forward slash for consistent
             # display across platforms (Linux/macOS/Windows).
@@ -79,4 +106,9 @@ def scan_roots(roots, min_depth=1, max_depth=5):
             # each other.  When two roots actually contain the same repo
             # (realpath collision), the first root wins — same as before.
             all_repos.setdefault(repo["path"], repo)
+    # T-021: the default branch virtually never changes, so probe it once per
+    # scan instead of on every status refresh (saves 1–6 subprocesses per repo
+    # per refresh).  Computed after dedup so duplicate paths aren't probed twice.
+    for repo in all_repos.values():
+        repo["default_branch"] = git_ops._default_branch(repo["path"])
     return all_repos
