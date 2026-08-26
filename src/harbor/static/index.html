@@ -639,6 +639,8 @@ const STR = {
     diffUntracked: (n, files) => `+ ${n} 个新文件（未跟踪）：${files}`,
     diffEmpty: "没有可显示的改动",
     connError: "⚠️ 无法连接后端服务 —— 请确认 harbor 正在运行",
+    connTimeout: "⚠️ 请求超时 —— 某个仓库的 git 命令可能卡住了",
+    retry: "重试",
     connFailed: "连接失败",
   },
   en: {
@@ -670,6 +672,8 @@ const STR = {
     diffUntracked: (n, files) => `+ ${n} untracked file(s): ${files}`,
     diffEmpty: "No changes to show",
     connError: "⚠️ Cannot connect to backend — make sure harbor is running",
+    connTimeout: "⚠️ Request timed out — a repo's git command may be stuck",
+    retry: "Retry",
     connFailed: "Connection failed",
   },
 };
@@ -722,7 +726,7 @@ $("#refreshBtn").addEventListener("click", async () => {
   btn.disabled = true;
   btn.style.opacity = "0.5";
   try {
-    const res = await fetch("/api/rescan", { method: "POST" });
+    const res = await fetch("/api/rescan", { method: "POST", signal: AbortSignal.timeout(30000) });
     const data = await res.json();
     if (data.ok) {
       await loadRepos();
@@ -747,13 +751,17 @@ function needsAttention(r) {
 
 async function loadRepos() {
   try {
-    const res = await fetch("/api/repos");
+    const res = await fetch("/api/repos", { signal: AbortSignal.timeout(15000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     repos = await res.json();
     render();
   } catch (err) {
     console.error("loadRepos failed:", err);
-    $("#attentionGrid").innerHTML = `<div class="empty">${t("connError")}</div>`;
+    const msg = err.name === "TimeoutError" || err.name === "AbortError"
+      ? t("connTimeout") : t("connError");
+    $("#attentionGrid").innerHTML =
+      `<div class="empty">${msg}<br><button class="btn-block ghost" id="retryLoadBtn" style="margin-top:12px">${t("retry")}</button></div>`;
+    $("#retryLoadBtn").addEventListener("click", loadRepos);
     $("#stats").textContent = t("connFailed");
   }
 }
