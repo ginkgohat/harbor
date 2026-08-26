@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: help run dev test coverage coverage-html lint build build-check clean
+.PHONY: help run dev test coverage coverage-html lint format build build-check clean
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -23,8 +23,10 @@ coverage-html:  ## Run tests and generate HTML coverage report in htmlcov/
 	PYTHONPATH=src $(PYTHON) -m pytest tests/ --cov=harbor --cov-report=html --cov-report=term-missing
 	@echo "Open htmlcov/index.html in your browser to view the report."
 
-lint:   ## Run lint checks (ruff)
+lint:   ## Run lint checks (ruff + mypy)
 	$(PYTHON) -m ruff check src/ tests/
+	@# mypy only checks src/ (progressive, not required to pass yet — informational)
+	-$(PYTHON) -m mypy src/ 2>/dev/null || echo 'mypy: skipped (not installed or informational only)'
 
 build:  ## Build the package
 	$(PYTHON) -m build

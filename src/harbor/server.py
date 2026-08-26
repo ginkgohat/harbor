@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from typing import ClassVar
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import config as config_mod
@@ -232,7 +233,7 @@ def start_pull_all_job(repos):
                     # would skip the "done" event and leak this job's queue.
                     try:
                         f.result()
-                    except Exception as exc:  # noqa: BLE001 — best-effort reporting
+                    except Exception as exc:
                         q.put({"error": str(exc), "repo": "<unknown>"})
         finally:
             # Always emit "done" so the SSE consumer can clean up the job
@@ -247,16 +248,16 @@ def start_pull_all_job(repos):
 class Handler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for the Harbor web UI."""
 
-    repos = {}
-    html_path = ""
-    static_dir = ""
-    config_path = ""
-    min_depth = 1
-    max_depth = 5
+    repos: ClassVar[dict] = {}
+    html_path: ClassVar[str] = ""
+    static_dir: ClassVar[str] = ""
+    config_path: ClassVar[str] = ""
+    min_depth: ClassVar[int] = 1
+    max_depth: ClassVar[int] = 5
 
     # CLI args take priority and aren't hot-reloaded from config file.
-    cli_min_depth = None
-    cli_max_depth = None
+    cli_min_depth: ClassVar[int | None] = None
+    cli_max_depth: ClassVar[int | None] = None
 
     # ------------------------------------------------------------------
     # Helpers

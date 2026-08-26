@@ -413,7 +413,7 @@ def test_do_action_unknown_action(tmp_path):
     init_repo(tmp_path / "r")
     path = str(tmp_path / "r")
     repos = {path: {"name": "r", "path": path}}
-    code, obj = do_action(path, "bogus", repos)
+    code, _obj = do_action(path, "bogus", repos)
     assert code == 400
 
 
