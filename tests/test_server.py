@@ -1,13 +1,19 @@
 """Tests for harbor.server — routing, JSON body parsing, auth, and pull-all worker."""
 
+import http.server
 import io
 import json
 import os
 import queue
+import socket
 import sys
+import threading
 import time
+import urllib.request
+from urllib.error import HTTPError
 
 import pytest
+import pytest as _pytest
 
 from harbor import config as config_mod
 from harbor import server
@@ -286,8 +292,6 @@ def test_action_same_origin_allows_through(tmp_path):
 # T-010 — origin check centralized in _dispatch: all mutating routes protected
 # ---------------------------------------------------------------------------
 
-import pytest as _pytest
-
 @_pytest.mark.parametrize("method,path,body", [
     ("POST", "/api/repo/x/action", b'{"action":"pull"}'),
     ("POST", "/api/pull-all", b"{}"),
@@ -349,13 +353,12 @@ def test_index_serves_csp_header(tmp_path):
     h = _make_handler("GET", "/", body=b"")
     h.do_GET()
     headers = _response_headers(h)
-    csp_lines = [l for l in headers if l.lower().startswith("content-security-policy:")]
+    csp_lines = [h for h in headers if h.lower().startswith("content-security-policy:")]
     assert len(csp_lines) == 1
     assert "default-src 'self'" in csp_lines[0]
 
 
 def test_static_file_serves_csp_header(tmp_path, monkeypatch):
-    import os
     static_dir = tmp_path / "static"
     static_dir.mkdir()
     (static_dir / "test.js").write_text("console.log(1)")
@@ -363,7 +366,7 @@ def test_static_file_serves_csp_header(tmp_path, monkeypatch):
     h = _make_handler("GET", "/static/test.js", body=b"")
     h.do_GET()
     headers = _response_headers(h)
-    csp_lines = [l for l in headers if l.lower().startswith("content-security-policy:")]
+    csp_lines = [h for h in headers if h.lower().startswith("content-security-policy:")]
     assert len(csp_lines) == 1
     assert "default-src 'self'" in csp_lines[0]
 
@@ -374,7 +377,7 @@ def test_json_response_serves_csp_header(tmp_path):
     h = _make_handler("GET", "/api/repos", body=b"")
     h.do_GET()
     headers = _response_headers(h)
-    csp_lines = [l for l in headers if l.lower().startswith("content-security-policy:")]
+    csp_lines = [h for h in headers if h.lower().startswith("content-security-policy:")]
     assert len(csp_lines) == 1
     assert "default-src 'self'" in csp_lines[0]
 
@@ -385,7 +388,6 @@ def test_json_response_serves_csp_header(tmp_path):
 
 def test_action_response_includes_fresh_status(tmp_path):
     """POST action returns the post-action status for per-card refresh."""
-    import subprocess
     # Import init_repo from test_harbor
     from tests.test_harbor import init_repo
     init_repo(tmp_path / "r")
@@ -631,3 +633,171 @@ class _MockExecutor:
             def result(self_):
                 return fn(*args, **kwargs)
         return _MockFuture()
+
+
+# ---------------------------------------------------------------------------
+# T-050 — SSE stream integration tests (real ThreadingHTTPServer)
+# ---------------------------------------------------------------------------
+
+
+
+def _start_real_server(monkeypatch, tmp_path):
+    """Start a real ThreadingHTTPServer on a random free port.
+
+    Returns (base_url, server).  Caller must call server.shutdown() when done.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("min_depth = 1\nmax_depth = 3\n")
+    server.Handler.config_path = str(config_path)
+    server.Handler.html_path = str(tmp_path / "index.html")
+    (tmp_path / "index.html").write_text("<html></html>")
+    server.Handler.static_dir = str(tmp_path / "static")
+    (tmp_path / "static").mkdir(exist_ok=True)
+    server.Handler.repos = {}
+
+    def noop_pull(repo, q):
+        q.put({"done": True})
+
+    monkeypatch.setattr(server.git_ops, "pull_one", noop_pull)
+    monkeypatch.setattr(server, "ThreadPoolExecutor", _MockExecutor)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    port = srv.server_address[1]
+
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+
+    return f"http://127.0.0.1:{port}", srv
+
+
+def _read_sse_events(base_url, job_id, max_events=100, timeout=3):
+    """Read SSE events from /api/stream?job=... until 'done' or timeout.
+
+    Uses a raw socket instead of urllib because HTTP/1.0 SSE responses have
+    no Content-Length and urllib waits for EOF before returning any data.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    port = parsed.port
+    path = f"/api/stream?job={job_id}"
+
+    events = []
+    sock = socket.socket()
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        sock.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n".encode()
+        )
+        # Read until end of headers
+        header_buf = b""
+        while b"\r\n\r\n" not in header_buf:
+            chunk = sock.recv(1024)
+            if not chunk:
+                return events
+            header_buf += chunk
+        header_end = header_buf.find(b"\r\n\r\n") + 4
+        body = header_buf[header_end:]
+
+        buf = body.decode("utf-8", errors="replace")
+        while len(events) < max_events:
+            while "\n\n" in buf:
+                block, buf = buf.split("\n\n", 1)
+                data_lines = [ln[6:] for ln in block.split("\n") if ln.startswith("data: ")]
+                if data_lines:
+                    payload = "\n".join(data_lines)
+                    events.append(json.loads(payload))
+                    if events[-1].get("done"):
+                        return events
+            try:
+                chunk = sock.recv(1024)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk.decode("utf-8", errors="replace")
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    return events
+
+
+def test_sse_stream_emits_done_and_job_is_cleaned_up(monkeypatch, tmp_path):
+    """Normal path: 'done' event arrives, JOBS entry is removed."""
+    server.JOBS.clear()
+    base_url, srv = _start_real_server(monkeypatch, tmp_path)
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/api/pull-all",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = json.loads(resp.read())
+        job_id = body["job_id"]
+        assert job_id in server.JOBS
+
+        events = _read_sse_events(base_url, job_id, timeout=3)
+        assert len(events) >= 1
+        assert events[-1].get("done") is True
+
+        assert job_id not in server.JOBS
+    finally:
+        srv.shutdown()
+
+
+def test_sse_stream_404_for_unknown_job(monkeypatch, tmp_path):
+    """Requesting a stream for a non-existent job returns 404."""
+    base_url, srv = _start_real_server(monkeypatch, tmp_path)
+    try:
+        with pytest.raises(HTTPError) as exc_info:
+            urllib.request.urlopen(f"{base_url}/api/stream?job=nonexistent", timeout=3)
+        assert exc_info.value.code == 404
+    finally:
+        srv.shutdown()
+
+
+def test_sse_client_disconnect_leaves_job_for_sweep(monkeypatch, tmp_path):
+    """Client disconnects before 'done' — job stays until TTL sweep cleans it."""
+    server.JOBS.clear()
+    base_url, srv = _start_real_server(monkeypatch, tmp_path)
+    try:
+        slow_q = queue.Queue()
+        slow_job_id = "slow-test-job"
+        with server.JOBS_LOCK:
+            server.JOBS[slow_job_id] = {"queue": slow_q, "created": time.monotonic()}
+
+        slow_q.put({"repo": "test", "status": "running"})
+        # Connect via raw socket, read one event, then close abruptly
+        from urllib.parse import urlparse
+        parsed = urlparse(base_url)
+        sock = socket.socket()
+        sock.settimeout(2)
+        sock.connect((parsed.hostname, parsed.port))
+        sock.sendall(
+            f"GET /api/stream?job={slow_job_id} HTTP/1.1\r\n"
+            f"Host: {parsed.hostname}:{parsed.port}\r\n\r\n".encode()
+        )
+        # Read until we get the first event
+        data = b""
+        while b"\n\n" not in data:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            data += chunk
+        sock.close()
+
+        # Give the server thread a moment to notice the disconnect
+        time.sleep(0.2)
+        assert slow_job_id in server.JOBS
+
+        # Simulate TTL expiry — sweep should clean it
+        with server.JOBS_LOCK:
+            server.JOBS[slow_job_id]["created"] = time.monotonic() - server.JOB_TTL_SECONDS - 100
+        server._sweep_stale_jobs()
+        assert slow_job_id not in server.JOBS
+    finally:
+        srv.shutdown()

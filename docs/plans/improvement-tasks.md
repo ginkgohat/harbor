@@ -3,7 +3,7 @@
 > 来源：2024-08 项目全面评审（架构 / 代码 / 安全 / 性能 / 前端 / 测试 / 发布）。
 > 每个任务是**可独立开发、独立验收**的最小交付单元。
 > 可行性验证结论见同目录 `feasibility-validation.md`。
-> 已完成的任务（P0 Bug、安全小项、性能、前端速赢 i18n/CSP/ahead/diff 截断/增量刷新/porcelain=v2 合并/default 分支缓存/worktree 漏检/JOBS 泄漏）已从本清单移除，详见已合并的 PR。
+> 已完成的任务（P0 Bug、安全小项、性能、前端速赢 i18n/CSP/ahead/diff 截断/增量刷新/porcelain=v2 合并/default 分支缓存/worktree 漏检/JOBS 泄漏、ruff 加码+mypy+pre-commit、SSE 集成测试、setuptools-scm+Trusted Publishing、CI 3.14 矩阵）已从本清单移除，详见已合并的 PR。
 
 ## 状态图例
 
@@ -45,7 +45,7 @@
 - **预估**: 4h ｜ **依赖**: T-030
 
 ### T-032 Ruff 规则加码 + 渐进式 mypy
-- **状态**: ☐ 待办
+- **状态**: ✅ 完成
 - **改动点**: ruff select 追加 `UP, SIM, RUF, C4` 并修复告警；mypy 先只查 `src/harbor`、宽松配置起步；加 `.pre-commit-config.yaml`（ruff + ruff-format + 基础 hooks）。
 - **验收标准**: `make lint` 含新规则全绿；pre-commit 本地可用；CI 加 pre-commit job（可选）。
 - **预估**: 2h ｜ **依赖**: 建议 T-031 之后（减少返工）
@@ -82,7 +82,7 @@
 ## P1 — 测试建设
 
 ### T-050 SSE 流集成测试（覆盖泄漏修复）
-- **状态**: ☐ 待办
+- **状态**: ✅ 完成
 - **改动点**: 线程起真实 ThreadingHTTPServer + urllib 读流；用例：正常 done、客户端提前断开（联动 T-002）、并发双 job。
 - **验收标准**: 三条路径均有断言；总耗时 < 5s。
 - **预估**: 3h ｜ **依赖**: T-002
@@ -147,7 +147,7 @@
 - **预估**: 2h ｜ **依赖**: 无
 
 ### T-072 setuptools-scm + PyPI Trusted Publishing
-- **状态**: ☐ 待办
+- **状态**: ✅ 完成
 - **改动点**: build-system 接管版本号（tag 即发版）；`.github/workflows/release.yml`（build + pypa/gh-action-pypi-publish OIDC）；`CHANGELOG.md`。
 - **预估**: 3h ｜ **依赖**: 无
 
@@ -161,7 +161,7 @@
 - **建议**: 前端对 404 做「repo 已被移除」的友好提示。
 
 ### T-082 Python 版本矩阵与本地环境差异
-- **状态**: ☐ 待办（P2 低优先级）
+- **状态**: ✅ 完成
 - **说明**: 本地 `.venv` 为 Python 3.14，CI 矩阵上限 3.13。tomli-w/platformdirs 在 3.14 实测正常，但建议 CI 矩阵补 `"3.14"` 或加 `allow-prerelease` 策略说明。
 
 ---
@@ -170,7 +170,7 @@
 
 | 批次 | 任务 | 说明 |
 |---|---|---|
-| Batch 4（2天） | T-030, T-031, T-032 | 架构重构（一次性做完减少冲突） |
-| Batch 5（2天) | T-050, T-051, T-045, T-070, T-071 | 测试建设 + 依赖引入 |
-| Batch 6（按需） | T-011, T-052, T-043, T-044, T-072 | 鉴权 + e2e + a11y + 发版 |
+| Batch 4（2天） | T-030, T-031 | 架构重构（一次性做完减少冲突） |
+| Batch 5（2天) | T-051, T-045, T-070, T-071 | 测试建设 + 依赖引入 |
+| Batch 6（按需） | T-011, T-052, T-043, T-044 | 鉴权 + e2e + a11y |
 | Batch 7（路线图） | T-060 → T-042 → T-061 → 其余 P2 | 功能迭代 |
