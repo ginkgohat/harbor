@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, unquote, urlparse
@@ -20,7 +21,23 @@ logger = logging.getLogger(__name__)
 JOBS_LOCK = threading.Lock()
 JOBS = {}
 
+# A job whose SSE consumer never read its "done" event (client disconnect)
+# would otherwise sit in JOBS forever.  Sweep entries older than this TTL
+# lazily, whenever a new job is started.
+JOB_TTL_SECONDS = 3600
+
 MAX_WORKERS = 8
+
+# The UI is a single self-contained page with inline <script>/<style>, so
+# 'unsafe-inline' is unavoidable without a build step — but we still forbid
+# external resources and cross-origin connections (EventSource/fetch are
+# same-origin, which "connect-src 'self'" allows).
+CSP_HEADER = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "connect-src 'self'"
+)
 
 # ---------------------------------------------------------------------------
 # Routing table
@@ -135,10 +152,15 @@ def _post_rescan(self, m, parsed, body):
 
 @_route("POST", r"^/api/repo/(?P<path>.+)/action$")
 def _post_repo_action(self, m, parsed, body):
-    if not self._check_origin():
-        return
     path = unquote(m.group("path"))
     code, obj = git_ops.do_action(path, body.get("action"), self.repos)
+    # T-022: attach the repo's post-action status so the frontend can update
+    # just this card instead of re-fetching every repo.  The status must be
+    # sampled AFTER the action — discard/stash change state drastically.
+    if code == 200:
+        repo = self.repos.get(path)
+        if repo is not None:
+            obj["status"] = git_ops.repo_status(repo)
     self._send_json(code, obj)
 
 
@@ -180,12 +202,25 @@ def _browse_dir(path):
     return result
 
 
+def _sweep_stale_jobs():
+    """Drop jobs older than JOB_TTL_SECONDS.  Returns how many were swept."""
+    now = time.monotonic()
+    with JOBS_LOCK:
+        stale = [jid for jid, job in JOBS.items() if now - job.get("created", now) > JOB_TTL_SECONDS]
+        for jid in stale:
+            JOBS.pop(jid, None)
+    if stale:
+        logger.info("swept %d stale job(s) from JOBS", len(stale))
+    return len(stale)
+
+
 def start_pull_all_job(repos):
     """Start a background pull-all job and return its job_id."""
+    _sweep_stale_jobs()
     job_id = uuid.uuid4().hex
     q = queue.Queue()
     with JOBS_LOCK:
-        JOBS[job_id] = {"queue": q}
+        JOBS[job_id] = {"queue": q, "created": time.monotonic()}
 
     def worker():
         try:
@@ -231,6 +266,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Security-Policy", CSP_HEADER)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -238,10 +274,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _check_origin(self):
         """Return True if the request may proceed; False if 403 was sent.
 
-        Cross-origin POSTs are rejected.  A missing Origin/Referer (e.g. curl
-        from the same host) is allowed — same-origin policy is enforced by
-        the browser, not by us.  This is a defense-in-depth check for the
-        destructive actions exposed by ``/api/repo/<path>/action``.
+        Cross-origin mutation requests are rejected.  A missing Origin/Referer
+        (e.g. curl from the same host) is allowed — same-origin policy is
+        enforced by the browser, not by us.  This is a defense-in-depth check
+        applied centrally to every POST/DELETE in ``_dispatch``.
         """
         origin = self.headers.get("Origin") or self.headers.get("Referer", "")
         host = self.headers.get("Host", "")
@@ -265,6 +301,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Security-Policy", CSP_HEADER)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -295,6 +332,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         }.get(ext, "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        self.send_header("Content-Security-Policy", CSP_HEADER)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()
@@ -359,6 +397,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def _dispatch(self, method, parsed, body=None):
+        # Origin check is centralized here so every mutating route (actions,
+        # pull-all, rescan, roots) is protected, not just one of them.
+        if method in ("POST", "DELETE") and not self._check_origin():
+            return
         for m_method, pattern, handler in _ROUTES:
             if m_method != method:
                 continue
