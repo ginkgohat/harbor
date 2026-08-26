@@ -283,6 +283,139 @@ def test_action_same_origin_allows_through(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# T-010 — origin check centralized in _dispatch: all mutating routes protected
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest
+
+@_pytest.mark.parametrize("method,path,body", [
+    ("POST", "/api/repo/x/action", b'{"action":"pull"}'),
+    ("POST", "/api/pull-all", b"{}"),
+    ("POST", "/api/rescan", b"{}"),
+    ("POST", "/api/roots", b'{"path":"/tmp"}'),
+    ("DELETE", "/api/roots/%2Ftmp", b""),
+])
+def test_mutating_routes_reject_cross_origin(tmp_path, method, path, body):
+    """Every POST/DELETE route rejects cross-origin requests — not just one."""
+    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.Handler.repos = {}
+
+    headers = {
+        "Origin": "https://evil.example",
+        "Host": "127.0.0.1:8765",
+    }
+    h = _make_handler(method, path, body=body, headers=headers)
+    if method == "POST":
+        h.do_POST()
+    else:
+        h.do_DELETE()
+    status, body = _read_response(h)
+    assert status == 403
+    assert "cross-origin" in body["error"].lower()
+
+
+def test_get_requests_skip_origin_check(tmp_path):
+    """GET requests are not subject to origin validation (read-only)."""
+    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.Handler.repos = {}
+    headers = {
+        "Origin": "https://evil.example",
+        "Host": "127.0.0.1:8765",
+    }
+    h = _make_handler("GET", "/api/repos", body=b"", headers=headers)
+    h.do_GET()
+    status, body = _read_response(h)
+    # Should succeed (200), not be blocked by origin
+    assert status == 200
+    assert isinstance(body, list)
+
+
+# ---------------------------------------------------------------------------
+# T-012 — CSP header on all response types
+# ---------------------------------------------------------------------------
+
+def _response_headers(handler):
+    """Return the response status line + headers as a list of strings."""
+    raw = handler.wfile.getvalue()
+    head, _, _ = raw.partition(b"\r\n\r\n")
+    return [line.decode("latin1") for line in head.split(b"\r\n")]
+
+
+def test_index_serves_csp_header(tmp_path):
+    """Root page serves HTML with a CSP header."""
+    html_file = tmp_path / "index.html"
+    html_file.write_text("<html></html>")
+    server.Handler.html_path = str(html_file)
+    h = _make_handler("GET", "/", body=b"")
+    h.do_GET()
+    headers = _response_headers(h)
+    csp_lines = [l for l in headers if l.lower().startswith("content-security-policy:")]
+    assert len(csp_lines) == 1
+    assert "default-src 'self'" in csp_lines[0]
+
+
+def test_static_file_serves_csp_header(tmp_path, monkeypatch):
+    import os
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "test.js").write_text("console.log(1)")
+    monkeypatch.setattr(server.Handler, "static_dir", str(static_dir))
+    h = _make_handler("GET", "/static/test.js", body=b"")
+    h.do_GET()
+    headers = _response_headers(h)
+    csp_lines = [l for l in headers if l.lower().startswith("content-security-policy:")]
+    assert len(csp_lines) == 1
+    assert "default-src 'self'" in csp_lines[0]
+
+
+def test_json_response_serves_csp_header(tmp_path):
+    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.Handler.repos = {}
+    h = _make_handler("GET", "/api/repos", body=b"")
+    h.do_GET()
+    headers = _response_headers(h)
+    csp_lines = [l for l in headers if l.lower().startswith("content-security-policy:")]
+    assert len(csp_lines) == 1
+    assert "default-src 'self'" in csp_lines[0]
+
+
+# ---------------------------------------------------------------------------
+# T-022 — action response includes fresh post-action status
+# ---------------------------------------------------------------------------
+
+def test_action_response_includes_fresh_status(tmp_path):
+    """POST action returns the post-action status for per-card refresh."""
+    import subprocess
+    # Import init_repo from test_harbor
+    from tests.test_harbor import init_repo
+    init_repo(tmp_path / "r")
+    path = str(tmp_path / "r")
+    server.Handler.repos = {path: {"name": "r", "path": path}}
+
+    h = _make_handler("POST", f"/api/repo/{path}/action",
+                      body=b'{"action":"stash"}')
+    h.do_POST()
+    status, body = _read_response(h)
+    assert status == 200
+    assert "status" in body
+    assert body["status"]["name"] == "r"
+    assert body["status"]["path"] == path
+    assert "dirty" in body["status"]
+    assert "branch" in body["status"]
+
+
+def test_action_unknown_repo_has_no_status(tmp_path):
+    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.Handler.repos = {}
+    h = _make_handler("POST", "/api/repo/nonexistent/action",
+                      body=b'{"action":"pull"}')
+    h.do_POST()
+    status, body = _read_response(h)
+    assert status == 404
+    assert "status" not in body
+
+
+# ---------------------------------------------------------------------------
 # start_pull_all_job worker always emits {"done": True}  (C-2)
 # ---------------------------------------------------------------------------
 
@@ -420,3 +553,81 @@ def test_cli_roots_persist_to_config(tmp_path, monkeypatch):
     real = str(work_dir.resolve())
     paths = [os.path.realpath(r["path"]) for r in config.get("roots", [])]
     assert real in paths
+
+
+# ---------------------------------------------------------------------------
+# T-002 — stale job TTL sweep
+# ---------------------------------------------------------------------------
+
+def test_stale_job_swept_when_new_job_starts(monkeypatch):
+    """A job older than JOB_TTL_SECONDS is removed when a new job starts."""
+    server.JOBS.clear()
+    server.JOBS["old"] = {"queue": queue.Queue(), "created": time.monotonic() - server.JOB_TTL_SECONDS - 10}
+
+    def noop_pull(repo, q):
+        q.put({"done": True})
+
+    monkeypatch.setattr(server.git_ops, "pull_one", noop_pull)
+    monkeypatch.setattr(server, "ThreadPoolExecutor", _MockExecutor)
+
+    job_id = server.start_pull_all_job({"/fake": {"name": "fake", "path": "/fake"}})
+    # Old job should have been swept
+    assert "old" not in server.JOBS
+    # New job is present
+    assert job_id in server.JOBS
+    # Clean up
+    server.JOBS.pop(job_id, None)
+
+
+def test_fresh_job_survives_sweep(monkeypatch):
+    """A recently-created job survives the lazy sweep."""
+    server.JOBS.clear()
+    server.JOBS["fresh"] = {"queue": queue.Queue(), "created": time.monotonic() - 10}
+
+    def noop_pull(repo, q):
+        q.put({"done": True})
+
+    monkeypatch.setattr(server.git_ops, "pull_one", noop_pull)
+    monkeypatch.setattr(server, "ThreadPoolExecutor", _MockExecutor)
+
+    job_id = server.start_pull_all_job({"/fake": {"name": "fake", "path": "/fake"}})
+    assert "fresh" in server.JOBS
+    # Clean up
+    server.JOBS.pop(job_id, None)
+    server.JOBS.pop("fresh", None)
+
+
+def test_job_records_created_timestamp(monkeypatch):
+    """Every new job gets a 'created' monotonic timestamp."""
+    server.JOBS.clear()
+
+    def noop_pull(repo, q):
+        q.put({"done": True})
+
+    monkeypatch.setattr(server.git_ops, "pull_one", noop_pull)
+    monkeypatch.setattr(server, "ThreadPoolExecutor", _MockExecutor)
+
+    before = time.monotonic()
+    job_id = server.start_pull_all_job({"/fake": {"name": "fake", "path": "/fake"}})
+    after = time.monotonic()
+
+    job = server.JOBS[job_id]
+    assert "created" in job
+    assert before <= job["created"] <= after
+    # Clean up
+    server.JOBS.pop(job_id, None)
+
+
+class _MockExecutor:
+    """Minimal ThreadPoolExecutor stand-in that runs work synchronously."""
+    def __init__(self, max_workers=1):
+        pass
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        pass
+    def submit(self, fn, *args, **kwargs):
+        class _MockFuture:
+            def result(self_):
+                return fn(*args, **kwargs)
+        return _MockFuture()
