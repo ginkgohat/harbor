@@ -31,7 +31,19 @@ Repository = "https://github.com/ginkgohat/harbor"
 harbor = "harbor.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=9.1.1", "pytest-timeout", "ruff", "pytest-cov", "build>=1", "twine", "mypy", "pre-commit", "hypothesis>=6", "pytest-playwright"]
+dev = [
+    "pytest>=9.1.1; python_version >= '3.10'",
+    "pytest>=8,<9; python_version < '3.10'",
+    "pytest-timeout",
+    "ruff",
+    "pytest-cov",
+    "build>=1",
+    "twine",
+    "mypy",
+    "pre-commit",
+    "hypothesis>=6",
+    "pytest-playwright",
+]
 
 [build-system]
 requires = ["setuptools>=64", "setuptools-scm>=10.2.1"]
