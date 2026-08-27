@@ -37,9 +37,11 @@ It's also intentionally simple: one Python file + one HTML file. No build step, 
 
 ## Quick Start
 
+> **Note**: The PyPI name `harbor` is taken by another project. Install from GitHub:
+
 ```bash
-# Install
-pip install harbor
+# Install from GitHub
+pip install git+https://github.com/ginkgohat/harbor.git
 
 # Run — scan the current directory
 harbor
@@ -53,7 +55,7 @@ harbor ~/work ~/personal ~/oss
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765) — or let Harbor open it for you.
 
-### From source
+### From source (development)
 
 ```bash
 git clone https://github.com/ginkgohat/harbor.git

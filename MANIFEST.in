@@ -1,0 +1,30 @@
+# sdist manifest — controls what goes into the source distribution tarball.
+# setuptools-scm includes all git-tracked files by default; we prune the extras.
+
+# Project files we explicitly want
+include LICENSE
+include README.md
+include README_zh.md
+include SECURITY.md
+include pyproject.toml
+include Makefile
+
+# Source and static assets
+recursive-include src *.py
+recursive-include src/harbor/static *
+
+# Tests — include so downstream packagers can run the suite
+recursive-include tests *.py
+recursive-include tests/frontend *.js
+
+# Prune directories that don't belong in a source dist
+prune .github
+prune .claude
+prune .ai-toolkit
+prune docs/plans
+
+# Misc files that are dev-only
+global-exclude .gitignore
+global-exclude .pre-commit-config.yaml
+global-exclude AGENT.md
+global-exclude CONTRIBUTING.md
