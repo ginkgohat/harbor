@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from harbor.__main__ import _create_server
-from harbor.config import _toml_str, load_config, resolve_roots, save_config
+from harbor.config import load_config, resolve_roots, save_config
 from harbor.git import (
     ActionOutcome,
     do_action,
@@ -539,10 +539,30 @@ def test_get_diff_truncates_large_diff(tmp_path):
 # Config
 # ---------------------------------------------------------------------------
 
-def test_toml_str():
-    assert _toml_str("hello") == '"hello"'
-    assert _toml_str('say "hi"') == '"say \\"hi\\""'
-    assert _toml_str("a\\b") == '"a\\\\b"'
+def test_save_load_round_trip(tmp_path):
+    """tomli_w produces valid TOML that tomllib can read back unchanged."""
+    config_path = tmp_path / "config.toml"
+    config = {
+        "roots": [
+            {"path": "~/work", "label": "Work"},
+            {"path": "~/personal"},
+            # Edge case: path with backslashes and quotes
+            {"path": 'C:\\Users\\test "quotes"', "label": 'say "hi"'},
+        ],
+        "port": 9999,
+        "min_depth": 1,
+        "max_depth": 5,
+    }
+    save_config(str(config_path), config)
+    loaded = load_config(str(config_path))
+    assert loaded["port"] == 9999
+    assert loaded["min_depth"] == 1
+    assert loaded["max_depth"] == 5
+    assert len(loaded["roots"]) == 3
+    assert loaded["roots"][0]["path"] == "~/work"
+    assert loaded["roots"][0]["label"] == "Work"
+    assert loaded["roots"][2]["path"] == 'C:\\Users\\test "quotes"'
+    assert loaded["roots"][2]["label"] == 'say "hi"'
 
 
 def test_save_and_load_config(tmp_path):
@@ -563,6 +583,52 @@ def test_save_and_load_config(tmp_path):
     assert loaded["roots"][0]["path"] == "~/work"
     assert loaded["roots"][0]["label"] == "Work"
     assert loaded["roots"][1]["path"] == "~/personal"
+
+
+def test_migrate_legacy_config(tmp_path, monkeypatch):
+    """Legacy config at ~/.config/harbor/config.toml is migrated to the platformdirs path."""
+    from harbor import config as config_mod
+
+    # Set up a fake legacy dir and a fake new config path
+    legacy_dir = tmp_path / "legacy" / "harbor"
+    legacy_dir.mkdir(parents=True)
+    legacy_path = legacy_dir / "config.toml"
+    legacy_path.write_text('port = 4242\nmin_depth = 2\n')
+
+    new_dir = tmp_path / "new" / "harbor"
+    new_path = new_dir / "config.toml"
+
+    monkeypatch.setattr(config_mod, "_LEGACY_CONFIG_PATH", legacy_path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", new_path)
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", new_dir)
+
+    # load_config from the new path should auto-migrate
+    loaded = load_config(str(new_path))
+    assert loaded is not None
+    assert loaded["port"] == 4242
+    assert loaded["min_depth"] == 2
+
+    # New file exists, legacy file is gone, backup remains
+    assert new_path.is_file()
+    assert not legacy_path.is_file()
+    assert legacy_path.with_suffix(".bak").is_file()
+
+
+def test_migrate_legacy_noop_when_no_legacy(tmp_path, monkeypatch):
+    """If no legacy config exists, load_config just returns None."""
+    from harbor import config as config_mod
+
+    new_dir = tmp_path / "new" / "harbor"
+    new_path = new_dir / "config.toml"
+    legacy_dir = tmp_path / "nonexistent"
+    legacy_path = legacy_dir / "config.toml"
+
+    monkeypatch.setattr(config_mod, "_LEGACY_CONFIG_PATH", legacy_path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", new_path)
+
+    loaded = load_config(str(new_path))
+    assert loaded is None
+    assert not new_path.is_file()
 
 
 def test_resolve_roots_from_config():
