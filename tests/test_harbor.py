@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from harbor.__main__ import _create_server
-from harbor.config import _toml_str, load_config, resolve_roots, save_config
+from harbor.config import load_config, resolve_roots, save_config
 from harbor.git import (
     ActionOutcome,
     do_action,
