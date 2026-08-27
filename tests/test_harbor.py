@@ -9,8 +9,14 @@ from unittest.mock import patch
 import pytest
 
 from harbor.__main__ import _create_server
-from harbor.config import load_config, resolve_roots, save_config
-from harbor.git import do_action, parse_porcelain_v2, repo_status, run_git
+from harbor.config import _toml_str, load_config, resolve_roots, save_config
+from harbor.git import (
+    ActionOutcome,
+    do_action,
+    parse_porcelain_v2,
+    repo_status,
+    run_git,
+)
 from harbor.scanner import find_repos, scan_roots
 from harbor.server import Handler
 
@@ -404,17 +410,18 @@ def test_repo_status_master_branch(tmp_path):
 
 
 def test_do_action_unknown_repo():
-    code, obj = do_action("nonexistent", "pull", {})
-    assert code == 404
-    assert obj["ok"] is False
+    outcome = do_action("nonexistent", "pull", {})
+    assert isinstance(outcome, ActionOutcome)
+    assert outcome.status == "not_found"
+    assert outcome.ok is False
 
 
 def test_do_action_unknown_action(tmp_path):
     init_repo(tmp_path / "r")
     path = str(tmp_path / "r")
     repos = {path: {"name": "r", "path": path}}
-    code, _obj = do_action(path, "bogus", repos)
-    assert code == 400
+    outcome = do_action(path, "bogus", repos)
+    assert outcome.status == "bad_request"
 
 
 def test_do_action_pull_no_upstream(tmp_path):
@@ -422,10 +429,10 @@ def test_do_action_pull_no_upstream(tmp_path):
     init_repo(tmp_path / "r")
     path = str(tmp_path / "r")
     repos = {path: {"name": "r", "path": path}}
-    code, obj = do_action(path, "pull", repos)
-    assert code == 200
-    # No upstream configured → git pull fails, which is expected
-    assert "upstream" in obj["output"].lower() or "no remote" in obj["output"].lower() or not obj["ok"]
+    outcome = do_action(path, "pull", repos)
+    # Pull skipped or failed — no upstream configured.
+    assert outcome.status in ("ok", "skipped")
+    assert "upstream" in outcome.output.lower() or "no remote" in outcome.output.lower() or not outcome.ok
 
 
 def test_do_action_stash(tmp_path):
@@ -433,9 +440,8 @@ def test_do_action_stash(tmp_path):
     (tmp_path / "r" / "dirty.txt").write_text("unstaged")
     path = str(tmp_path / "r")
     repos = {path: {"name": "r", "path": path}}
-    code, obj = do_action(path, "stash", repos)
-    assert code == 200
-    assert obj["ok"] is True
+    outcome = do_action(path, "stash", repos)
+    assert outcome.ok is True
     # After stash the repo should be clean
     status = repo_status(repos[path])
     assert status["dirty"] is False
@@ -446,9 +452,8 @@ def test_do_action_discard(tmp_path):
     (tmp_path / "r" / "junk.txt").write_text("to be discarded")
     path = str(tmp_path / "r")
     repos = {path: {"name": "r", "path": path}}
-    code, obj = do_action(path, "discard", repos)
-    assert code == 200
-    assert obj["ok"] is True
+    outcome = do_action(path, "discard", repos)
+    assert outcome.ok is True
     assert not (tmp_path / "r" / "junk.txt").exists()
 
 
@@ -458,9 +463,8 @@ def test_do_action_checkout_main(tmp_path):
     subprocess.run(["git", "-C", str(tmp_path / "r"), "checkout", "-b", "feature"], check=True, capture_output=True)
     path = str(tmp_path / "r")
     repos = {path: {"name": "r", "path": path}}
-    code, obj = do_action(path, "checkout-main", repos)
-    assert code == 200
-    assert obj["ok"] is True
+    outcome = do_action(path, "checkout-main", repos)
+    assert outcome.ok is True
     # Verify we're back on main
     status = repo_status(repos[path])
     assert status["branch"] == "main"
@@ -701,3 +705,97 @@ def test_create_server_success():
         result = _create_server(8765)
         assert result is mock_server
         mock_cls.assert_called_once_with(("127.0.0.1", 8765), Handler)
+
+
+# ---------------------------------------------------------------------------
+# T-030 — AppState dataclass
+# ---------------------------------------------------------------------------
+
+def test_app_state_defaults():
+    from harbor.state import AppState
+    state = AppState()
+    assert state.repos == {}
+    assert state.config_path == ""
+    assert state.min_depth == 1
+    assert state.max_depth == 5
+    assert state.cli_min_depth is None
+    assert state.cli_max_depth is None
+
+
+def test_app_state_is_independent():
+    """Two AppState instances don't share mutable defaults."""
+    from harbor.state import AppState
+    a = AppState()
+    b = AppState()
+    a.repos["/x"] = {"name": "x"}
+    assert b.repos == {}
+
+
+# ---------------------------------------------------------------------------
+# T-031 — Repo dataclass + safe_pull_check
+# ---------------------------------------------------------------------------
+
+def test_repo_dataclass_as_dict(tmp_path):
+    from harbor.git import Repo
+    repo = Repo(name="myrepo", path=str(tmp_path), root_label="work")
+    d = repo.as_dict()
+    assert d["name"] == "myrepo"
+    assert d["path"] == str(tmp_path)
+    assert d["root_label"] == "work"
+
+def test_repo_status_accepts_dataclass(tmp_path):
+    from harbor.git import Repo, repo_status
+    init_repo(tmp_path / "r")
+    repo = Repo(name="r", path=str(tmp_path / "r"), root_label="test")
+    status = repo_status(repo)
+    assert status["name"] == "r"
+    assert status["root_label"] == "test"
+    assert "branch" in status
+
+
+def test_safe_pull_check_clean_repo(tmp_path):
+    from harbor.git import safe_pull_check
+    init_repo(tmp_path / "r")
+    can, reason = safe_pull_check(str(tmp_path / "r"))
+    assert can is True
+    assert reason == ""
+
+
+def test_safe_pull_check_dirty_repo(tmp_path):
+    from harbor.git import safe_pull_check
+    init_repo(tmp_path / "r")
+    # Modify a tracked file (init_repo creates README.md)
+    (tmp_path / "r" / "README.md").write_text("modified\n")
+    can, reason = safe_pull_check(str(tmp_path / "r"))
+    assert can is False
+    assert "uncommitted changes" in reason
+
+
+def test_safe_pull_check_detached(tmp_path):
+    from harbor.git import safe_pull_check
+    init_repo(tmp_path / "r")
+    subprocess.run(
+        ["git", "-C", str(tmp_path / "r"), "checkout", "--detach", "HEAD"],
+        capture_output=True, check=True,
+    )
+    can, reason = safe_pull_check(str(tmp_path / "r"))
+    assert can is False
+    assert "detached" in reason
+
+
+def test_do_action_returns_action_outcome(tmp_path):
+    from harbor.git import ActionOutcome
+    outcome = do_action("nonexistent", "pull", {})
+    assert isinstance(outcome, ActionOutcome)
+    assert outcome.status == "not_found"
+    assert outcome.ok is False
+
+def test_do_action_outcome_as_dict(tmp_path):
+    init_repo(tmp_path / "r")
+    path = str(tmp_path / "r")
+    repos = {path: {"name": "r", "path": path}}
+    outcome = do_action(path, "stash", repos)
+    d = outcome.as_dict()
+    assert "ok" in d
+    assert "output" in d
+    assert isinstance(d["ok"], bool)
