@@ -41,7 +41,8 @@ dev = [
     "twine",
     "mypy",
     "pre-commit",
-    "hypothesis>=6.165.10",
+    "hypothesis>=6.165.10; python_version >= '3.10'",
+    "hypothesis>=6; python_version < '3.10'",
     "pytest-playwright",
 ]
 
