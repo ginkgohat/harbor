@@ -6,11 +6,14 @@ Usage:
     python -m harbor               # equivalent to `harbor`
 """
 
+from __future__ import annotations
+
 import argparse
 import contextlib
 import http.server
 import logging
 import os
+import secrets
 import sys
 import threading
 import webbrowser
@@ -18,6 +21,7 @@ import webbrowser
 from . import __version__
 from . import config as config_mod
 from . import scanner as scanner_mod
+from . import server as server_mod
 from .server import Handler
 
 logger = logging.getLogger(__name__)
@@ -147,9 +151,19 @@ def main():
     Handler.cli_min_depth = args.min_depth
     Handler.cli_max_depth = args.max_depth
 
+    # --- Authentication token -----------------------------------------
+    # T-011: generate a random token and include it in the URL.
+    # Protects against CSRF, DNS rebinding, and local process attacks.
+    token = secrets.token_urlsafe(16)
+    server_mod.AUTH_TOKEN = token
+
     server = _create_server(port)
-    url = f"http://127.0.0.1:{port}"
-    logger.info("serving at %s", url)
+    url = f"http://127.0.0.1:{port}/?token={token}"
+    logger.info("serving at http://127.0.0.1:%d/?token=<hidden>", port)
+    logger.info(
+        "note: the URL contains an auth token — don't share it or paste it "
+        "into untrusted pages. It will also appear in your browser history."
+    )
 
     if not args.no_browser:
         threading.Timer(0.5, lambda: _try_open_browser(url)).start()

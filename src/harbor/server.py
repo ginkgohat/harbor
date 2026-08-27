@@ -1,5 +1,7 @@
 """HTTP server — routes, SSE streaming, and static file serving."""
 
+from __future__ import annotations
+
 import http.server
 import json
 import logging
@@ -21,6 +23,15 @@ logger = logging.getLogger(__name__)
 
 JOBS_LOCK = threading.Lock()
 JOBS = {}
+
+# Authentication token — set at startup by __main__.
+# When set (not None), every API and SSE request must include ?token=<value>
+# or it gets a 403.  Static assets and the root HTML page are always
+# accessible (the HTML page itself carries the token in its URL query).
+#
+# This protects against CSRF, DNS rebinding, and random local processes
+# discovering the port and calling destructive endpoints (discard, etc.).
+AUTH_TOKEN: str | None = None
 
 # A job whose SSE consumer never read its "done" event (client disconnect)
 # would otherwise sit in JOBS forever.  Sweep entries older than this TTL
@@ -397,7 +408,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Dispatch
     # ------------------------------------------------------------------
 
+    def _is_static_or_root(self, parsed) -> bool:
+        """Return True if the request targets the root page or static assets.
+
+        These paths are exempt from token auth so the browser can load the
+        page normally (the token is in the URL query string read by JS).
+        """
+        path = parsed.path
+        return path == "/" or path == "/index.html" or path.startswith("/static/") or path == "/favicon.ico"
+
+    def _check_token(self, parsed) -> bool:
+        """Return True if the request has a valid auth token (or none is needed).
+
+        Sends a 403 and returns False when auth is required but missing/wrong.
+        """
+        if AUTH_TOKEN is None:
+            return True
+        if self._is_static_or_root(parsed):
+            return True
+        qs = parse_qs(parsed.query)
+        token = (qs.get("token") or [None])[0]
+        # Also accept token in POST body for routes that read JSON bodies.
+        if not token:
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[len("Bearer "):]
+        if token != AUTH_TOKEN:
+            self._send_json(403, {"ok": False, "error": "invalid or missing token"})
+            return False
+        return True
+
     def _dispatch(self, method, parsed, body=None):
+        # Token check is centralized here — every non-static route is protected.
+        if not self._check_token(parsed):
+            return
         # Origin check is centralized here so every mutating route (actions,
         # pull-all, rescan, roots) is protected, not just one of them.
         if method in ("POST", "DELETE") and not self._check_origin():
@@ -433,4 +477,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._dispatch("DELETE", urlparse(self.path))
 
     def log_message(self, fmt, *args):
-        logger.debug("%s - %s", self.address_string(), fmt % args)
+        # T-011: never log the full URL which may contain the auth token.
+        # We log only the path portion (without query string).
+        msg = fmt % args
+        # BaseHTTPRequestHandler formats "GET /path?token=xxx HTTP/1.1" 200 -
+        # Strip the query string to avoid leaking tokens to logs.
+        import re as _re
+        cleaned = _re.sub(r"( \S+?)\?\S+? ", r"\1 ", msg, count=1)
+        logger.debug("%s - %s", self.address_string(), cleaned)
