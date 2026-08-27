@@ -76,7 +76,6 @@ def _read_response(handler):
 
 
 @pytest.fixture(autouse=True)
-@pytest.fixture(autouse=True)
 def _fresh_app_state():
     """Replace ``server.app_state`` with a clean :class:`AppState` per test.
 
