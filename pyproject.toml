@@ -32,7 +32,7 @@ Repository = "https://github.com/ginkgohat/harbor"
 harbor = "harbor.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-timeout", "ruff", "pytest-cov", "build>=1", "twine", "mypy", "pre-commit", "hypothesis>=6"]
+dev = ["pytest>=7", "pytest-timeout", "ruff", "pytest-cov", "build>=1", "twine", "mypy", "pre-commit", "hypothesis>=6", "pytest-playwright"]
 
 [build-system]
 requires = ["setuptools>=64", "setuptools-scm>=8"]
@@ -91,6 +91,9 @@ check_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests requiring a running server and Playwright browser",
+]
 pythonpath = ["src"]
 
 [tool.coverage.run]
