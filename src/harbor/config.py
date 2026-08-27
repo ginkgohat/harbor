@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -10,10 +11,22 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
+import tomli_w
+from platformdirs import user_config_path
+
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR = Path.home() / ".config" / "harbor"
+# Cross-platform config dir (e.g. ~/.config/harbor on Linux/macOS,
+# %APPDATA%/harbor on Windows).  Uses appauthor=False so the path is
+# just the app name, no extra "ginkgohat" subdirectory.
+CONFIG_DIR = Path(user_config_path("harbor", appauthor=False))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+
+# Legacy path used before platformdirs (hardcoded to ~/.config/harbor).
+# On Linux/macOS this happens to match the platformdirs result, but on
+# Windows they differ.  We migrate the legacy file on startup if present.
+_LEGACY_CONFIG_DIR = Path.home() / ".config" / "harbor"
+_LEGACY_CONFIG_PATH = _LEGACY_CONFIG_DIR / "config.toml"
 
 # Top-level keys recognized by save_config.  Anything else in the config
 # dict is preserved silently (unknown keys would be dropped on save), so we
@@ -22,22 +35,57 @@ _KNOWN_KEYS = {"port", "min_depth", "max_depth", "roots"}
 
 
 def load_config(path):
-    """Load a TOML config file, returning a dict or None."""
+    """Load a TOML config file, returning a dict or None.
+
+    If *path* is the default CONFIG_PATH and the file doesn't exist, we
+    check for a legacy config at ~/.config/harbor/config.toml and migrate
+    it to the new platform-specific location.
+    """
+    path = Path(path)
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
     except FileNotFoundError:
+        # Auto-migrate from legacy path if the requested path is the default
+        if path.resolve() == CONFIG_PATH.resolve() and _LEGACY_CONFIG_PATH.is_file():
+            logger.info(
+                "Migrating config from %s to %s",
+                _LEGACY_CONFIG_PATH, CONFIG_PATH,
+            )
+            migrate_legacy_config()
+            return load_config(path)
         return None
     except tomllib.TOMLDecodeError:
         return None
 
 
+def migrate_legacy_config():
+    """Migrate the legacy ~/.config/harbor config to the platformdirs path.
+
+    The old file is kept as ``config.toml.bak`` in the legacy directory
+    so the user can roll back if something goes wrong.
+    """
+    if not _LEGACY_CONFIG_PATH.is_file():
+        return
+    # Back up the old file
+    backup = _LEGACY_CONFIG_PATH.with_suffix(".bak")
+    shutil.copy2(_LEGACY_CONFIG_PATH, backup)
+    logger.info("Legacy config backed up at %s", backup)
+    # Move to new location
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(_LEGACY_CONFIG_PATH), str(CONFIG_PATH))
+    logger.info("Config migrated to %s", CONFIG_PATH)
+
+
 def save_config(path, config):
-    """Write a config dict to a TOML file.
+    """Write a config dict to a TOML file using tomli_w.
 
     Only the keys Harbor knows about (port, min_depth, max_depth, roots)
     are written back.  Any other top-level keys are dropped — a warning
     is logged so this is not entirely silent.
+
+    Uses tomli_w for correct round-trip escaping (backslashes, quotes,
+    multi-line strings, etc.) instead of the previous hand-rolled serializer.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,32 +97,21 @@ def save_config(path, config):
             ", ".join(sorted(unknown)),
         )
 
-    lines = []
-
-    # Write scalar settings first (must come before [[roots]] in TOML)
+    # Build a clean dict with only recognized keys, preserving the order
+    # that makes the config file readable (scalars first, then roots table).
+    clean: dict = {}
     for key in ("port", "min_depth", "max_depth"):
         if key in config:
-            lines.append(f"{key} = {config[key]}")
-    if any(k in config for k in ("port", "min_depth", "max_depth")):
-        lines.append("")
+            clean[key] = config[key]
+    if "roots" in config:
+        clean["roots"] = [
+            {k: v for k, v in root.items() if k in ("path", "label")}
+            for root in config["roots"]
+        ]
 
-    # Write [[roots]] entries
-    for root in config.get("roots", []):
-        lines.append("[[roots]]")
-        lines.append(f'path = {_toml_str(root["path"])}')
-        if "label" in root:
-            lines.append(f'label = {_toml_str(root["label"])}')
-        lines.append("")
+    with open(path, "wb") as f:
+        tomli_w.dump(clean, f)
 
-    with open(path, "w") as f:
-        f.write("\n".join(lines))
-
-
-def _toml_str(s):
-    """Escape a string for TOML."""
-    # Basic TOML string escaping
-    escaped = s.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
 
 
 def resolve_roots(cli_paths, config):

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: help run dev test coverage coverage-html lint format build build-check clean
+.PHONY: help run dev test test-js coverage coverage-html lint format build build-check clean
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -16,6 +16,10 @@ test:   ## Run tests (unit + integration, excludes e2e)
 
 test-e2e:  ## Run end-to-end browser tests (requires playwright)
 	PYTHONPATH=src $(PYTHON) -m pytest tests/e2e/ -m e2e --browser chromium
+
+test-js: ## Run frontend JS tests + syntax check
+	@node --check src/harbor/static/harbor-utils.js && echo "harbor-utils.js: syntax OK"
+	@node tests/frontend/test-utils.js
 
 coverage:  ## Run tests with coverage report (fails if below threshold in pyproject.toml, excludes e2e)
 	PYTHONPATH=src $(PYTHON) -m pytest tests/ -m 'not e2e' --cov=harbor --cov-report=term-missing
