@@ -24,12 +24,21 @@ from harbor.scanner import find_repos, scan_roots
 # Strategy: generate lists of relative directory paths
 # ---------------------------------------------------------------------------
 
+# Windows reserved device names cannot be used as file/directory names
+# (case-insensitive). Exclude them so hypothesis never generates a path
+# that os.makedirs rejects on Windows (e.g. "NUL", "CON", "COM1").
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
 # Generate a path component: a short alphanumeric name
 _path_component = st.text(
     min_size=1,
     max_size=12,
     alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd")),
-)
+).filter(lambda s: s.upper() not in _WINDOWS_RESERVED)
 
 # Generate a relative path like "a/b/c" (0-4 components deep)
 _relative_path = st.lists(
