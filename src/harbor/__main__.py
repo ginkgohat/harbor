@@ -13,6 +13,7 @@ import contextlib
 import http.server
 import logging
 import os
+import secrets
 import sys
 import threading
 import webbrowser
@@ -155,9 +156,19 @@ def main():
     # Share state with the server module (read by every Handler instance).
     server_mod.app_state = state
 
+    # --- Authentication token -----------------------------------------
+    # T-011: generate a random token and include it in the URL.
+    # Protects against CSRF, DNS rebinding, and local process attacks.
+    token = secrets.token_urlsafe(16)
+    server_mod.AUTH_TOKEN = token
+
     httpd = _create_server(port)
-    url = f"http://127.0.0.1:{port}"
-    logger.info("serving at %s", url)
+    url = f"http://127.0.0.1:{port}/?token={token}"
+    logger.info("serving at http://127.0.0.1:%d/?token=<hidden>", port)
+    logger.info(
+        "note: the URL contains an auth token — don't share it or paste it "
+        "into untrusted pages. It will also appear in your browser history."
+    )
 
     if not args.no_browser:
         threading.Timer(0.5, lambda: _try_open_browser(url)).start()

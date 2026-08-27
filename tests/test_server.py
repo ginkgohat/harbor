@@ -81,10 +81,14 @@ def _fresh_app_state():
 
     This eliminates the previous snapshot/restore pattern: each test gets
     its own state object, so there is no risk of cross-test contamination
-    through class attributes.
+    through class attributes.  Disables auth token checks by default so
+    individual tests don't have to supply tokens.
     """
     server.app_state = AppState()
+    saved_token = server.AUTH_TOKEN
+    server.AUTH_TOKEN = None
     yield
+    server.AUTH_TOKEN = saved_token
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +332,121 @@ def test_get_requests_skip_origin_check(tmp_path):
     # Should succeed (200), not be blocked by origin
     assert status == 200
     assert isinstance(body, list)
+
+
+# ---------------------------------------------------------------------------
+# T-011 — local token authentication
+# ---------------------------------------------------------------------------
+
+def test_api_without_token_returns_403_when_auth_enabled(tmp_path):
+    """When AUTH_TOKEN is set, API calls without a token get 403."""
+    server.AUTH_TOKEN = "secret123"
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+
+    h = _make_handler("GET", "/api/repos", body=b"")
+    h.do_GET()
+    status, body = _read_response(h)
+    assert status == 403
+    assert body["ok"] is False
+    assert "token" in body["error"].lower()
+
+
+def test_api_with_correct_token_returns_200(tmp_path):
+    """When AUTH_TOKEN is set and the query has the right token, request proceeds."""
+    server.AUTH_TOKEN = "secret123"
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+
+    h = _make_handler("GET", "/api/repos?token=secret123", body=b"")
+    h.do_GET()
+    status, body = _read_response(h)
+    assert status == 200
+    assert isinstance(body, list)
+
+
+def test_api_with_wrong_token_returns_403(tmp_path):
+    """Wrong token value is rejected."""
+    server.AUTH_TOKEN = "secret123"
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+
+    h = _make_handler("GET", "/api/repos?token=wrong", body=b"")
+    h.do_GET()
+    status, _ = _read_response(h)
+    assert status == 403
+
+
+def test_static_and_root_exempt_from_token_auth(tmp_path):
+    """Static assets and the root page don't require a token."""
+    server.AUTH_TOKEN = "secret123"
+    # Root page
+    h = _make_handler("GET", "/", body=b"")
+    h.do_GET()
+    status, _ = _read_response(h)
+    # Should not be 403 (may be 200 or 500 depending on whether index.html exists)
+    assert status != 403
+    # Static file
+    h2 = _make_handler("GET", "/static/foo.js", body=b"")
+    h2.do_GET()
+    status2, _ = _read_response(h2)
+    assert status2 != 403
+    # favicon
+    h3 = _make_handler("GET", "/favicon.ico", body=b"")
+    h3.do_GET()
+    status3, _ = _read_response(h3)
+    assert status3 != 403
+
+
+def test_post_action_with_token(tmp_path):
+    """POST requests also accept token via query string."""
+    server.AUTH_TOKEN = "secret123"
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+
+    h = _make_handler("POST", "/api/rescan?token=secret123", body=b"{}")
+    h.do_POST()
+    status, body = _read_response(h)
+    assert status == 200
+    assert body["ok"] is True
+
+
+def test_bearer_token_auth(tmp_path):
+    """Token can also be passed via Authorization: Bearer header."""
+    server.AUTH_TOKEN = "secret123"
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+
+    headers = {"Authorization": "Bearer secret123"}
+    h = _make_handler("GET", "/api/repos", body=b"", headers=headers)
+    h.do_GET()
+    status, body = _read_response(h)
+    assert status == 200
+    assert isinstance(body, list)
+
+
+def test_no_auth_token_means_no_auth_required(tmp_path):
+    """When AUTH_TOKEN is None, no token is needed (backwards compatible)."""
+    assert server.AUTH_TOKEN is None  # fixture default
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+
+    h = _make_handler("GET", "/api/repos", body=b"")
+    h.do_GET()
+    status, body = _read_response(h)
+    assert status == 200
+    assert isinstance(body, list)
+
+
+def test_sse_stream_requires_token(tmp_path):
+    """SSE stream endpoint also requires a token."""
+    server.AUTH_TOKEN = "secret123"
+    # The /api/stream route is a GET — verify it's blocked without token
+    server.JOBS.clear()
+    h = _make_handler("GET", "/api/stream?job=nonexistent", body=b"")
+    h.do_GET()
+    status, _ = _read_response(h)
+    assert status == 403
 
 
 # ---------------------------------------------------------------------------
