@@ -12,14 +12,18 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import ClassVar
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import config as config_mod
 from . import git as git_ops
 from . import scanner as scanner_mod
+from .state import AppState
 
 logger = logging.getLogger(__name__)
+
+# Module-level application state — populated by __main__ at startup.
+# Tests can also set this directly to avoid touching class attributes.
+app_state: AppState = AppState()
 
 JOBS_LOCK = threading.Lock()
 JOBS = {}
@@ -92,12 +96,12 @@ def _get_favicon(self, m, parsed, body):
 
 @_route("GET", r"^/api/repos$")
 def _get_repos(self, m, parsed, body):
-    self._send_json(200, git_ops.get_repos_status(self.repos))
+    self._send_json(200, git_ops.get_repos_status(app_state.repos))
 
 
 @_route("GET", r"^/api/roots$")
 def _get_roots(self, m, parsed, body):
-    config = config_mod.load_config(self.config_path)
+    config = config_mod.load_config(app_state.config_path)
     roots = config_mod.resolve_roots([], config)
     # Renamed `l` → `label` to clear the E741 lint.
     self._send_json(200, [{"path": p, "label": label} for p, label in roots])
@@ -118,7 +122,7 @@ def _get_stream(self, m, parsed, body):
 @_route("GET", r"^/api/repo/(?P<path>.+)/diff$")
 def _get_repo_diff(self, m, parsed, body):
     path = unquote(m.group("path"))
-    diff = git_ops.get_diff(path, self.repos)
+    diff = git_ops.get_diff(path, app_state.repos)
     if diff is None:
         self.send_error(404)
     else:
@@ -127,7 +131,7 @@ def _get_repo_diff(self, m, parsed, body):
 
 @_route("POST", r"^/api/pull-all$")
 def _post_pull_all(self, m, parsed, body):
-    job_id = start_pull_all_job(self.repos)
+    job_id = start_pull_all_job(app_state.repos)
     self._send_json(200, {"job_id": job_id})
 
 
@@ -138,14 +142,14 @@ def _post_roots(self, m, parsed, body):
     if not path:
         self._send_json(400, {"ok": False, "error": "path is required"})
         return
-    config = config_mod.load_config(self.config_path) or {}
+    config = config_mod.load_config(app_state.config_path) or {}
     roots = config.setdefault("roots", [])
     # Avoid duplicate paths
     if any(r["path"] == path for r in roots):
         self._send_json(409, {"ok": False, "error": "path already exists"})
         return
     roots.append({"path": path, "label": label})
-    config_mod.save_config(self.config_path, config)
+    config_mod.save_config(app_state.config_path, config)
     self._rescan()
     self._send_json(200, {"ok": True, "path": path, "label": label})
 
@@ -157,29 +161,31 @@ def _post_rescan(self, m, parsed, body):
         "ok": True,
         "roots": [{"path": p, "label": label} for p, label in roots],
         "count": len(repos),
-        "min_depth": self.min_depth,
-        "max_depth": self.max_depth,
+        "min_depth": app_state.min_depth,
+        "max_depth": app_state.max_depth,
     })
 
 
 @_route("POST", r"^/api/repo/(?P<path>.+)/action$")
 def _post_repo_action(self, m, parsed, body):
     path = unquote(m.group("path"))
-    code, obj = git_ops.do_action(path, body.get("action"), self.repos)
+    outcome = git_ops.do_action(path, body.get("action"), app_state.repos)
     # T-022: attach the repo's post-action status so the frontend can update
     # just this card instead of re-fetching every repo.  The status must be
     # sampled AFTER the action — discard/stash change state drastically.
-    if code == 200:
-        repo = self.repos.get(path)
+    http_code = _outcome_http_code(outcome)
+    result = outcome.as_dict()
+    if outcome.status == "ok":
+        repo = app_state.repos.get(path)
         if repo is not None:
-            obj["status"] = git_ops.repo_status(repo)
-    self._send_json(code, obj)
+            result["status"] = git_ops.repo_status(repo)
+    self._send_json(http_code, result)
 
 
 @_route("DELETE", r"^/api/roots/(?P<path>.+)$")
 def _delete_root(self, m, parsed, body):
     path = unquote(m.group("path"))
-    config = config_mod.load_config(self.config_path)
+    config = config_mod.load_config(app_state.config_path)
     if not config or "roots" not in config:
         self._send_json(404, {"ok": False, "error": "no roots configured"})
         return
@@ -190,7 +196,7 @@ def _delete_root(self, m, parsed, body):
     if len(config["roots"]) == before:
         self._send_json(404, {"ok": False, "error": f"root '{path}' not found"})
         return
-    config_mod.save_config(self.config_path, config)
+    config_mod.save_config(app_state.config_path, config)
     self._rescan()
     self._send_json(200, {"ok": True, "path": path})
 
@@ -198,6 +204,21 @@ def _delete_root(self, m, parsed, body):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _outcome_http_code(outcome) -> int:
+    """Translate an :class:`ActionOutcome` status into an HTTP status code."""
+    mapping = {
+        "ok": 200,
+        "skipped": 200,
+        "not_found": 404,
+        "bad_request": 400,
+    }
+    return mapping.get(outcome.status, 200)
+
 
 def _browse_dir(path):
     """Return a list of subdirectories for the given path."""
@@ -257,18 +278,12 @@ def start_pull_all_job(repos):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    """HTTP request handler for the Harbor web UI."""
+    """HTTP request handler for the Harbor web UI.
 
-    repos: ClassVar[dict] = {}
-    html_path: ClassVar[str] = ""
-    static_dir: ClassVar[str] = ""
-    config_path: ClassVar[str] = ""
-    min_depth: ClassVar[int] = 1
-    max_depth: ClassVar[int] = 5
-
-    # CLI args take priority and aren't hot-reloaded from config file.
-    cli_min_depth: ClassVar[int | None] = None
-    cli_max_depth: ClassVar[int | None] = None
+    All mutable state lives in the module-level :data:`app_state`
+    (:class:`AppState`) instead of class attributes, so tests can reset
+    state cleanly and multiple instances share the same state naturally.
+    """
 
     # ------------------------------------------------------------------
     # Helpers
@@ -306,7 +321,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _serve_html(self):
         try:
-            with open(self.html_path, "rb") as f:
+            with open(app_state.html_path, "rb") as f:
                 body = f.read()
         except OSError:
             self.send_error(500, "index.html not found")
@@ -327,7 +342,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not name or "/" in name or ".." in name or name.startswith("."):
             self.send_error(400)
             return
-        full = os.path.join(type(self).static_dir, name)
+        full = os.path.join(app_state.static_dir, name)
         try:
             with open(full, "rb") as f:
                 body = f.read()
@@ -388,20 +403,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def _rescan(self):
-        """Re-scan all roots and update Handler.repos.
+        """Re-scan all roots and update app_state.repos.
 
         Also reloads min_depth / max_depth from the config file (unless
         overridden by CLI arguments at startup).
         """
-        config = config_mod.load_config(self.config_path) or {}
+        config = config_mod.load_config(app_state.config_path) or {}
         # Reload depth settings from config (CLI args remain supreme)
-        if type(self).cli_min_depth is None:
-            type(self).min_depth = config.get("min_depth", type(self).min_depth)
-        if type(self).cli_max_depth is None:
-            type(self).max_depth = config.get("max_depth", type(self).max_depth)
+        if app_state.cli_min_depth is None:
+            app_state.min_depth = config.get("min_depth", app_state.min_depth)
+        if app_state.cli_max_depth is None:
+            app_state.max_depth = config.get("max_depth", app_state.max_depth)
         roots = config_mod.resolve_roots([], config)
-        new_repos = scanner_mod.scan_roots(roots, min_depth=self.min_depth, max_depth=self.max_depth)
-        type(self).repos = new_repos
+        new_repos = scanner_mod.scan_roots(
+            roots, min_depth=app_state.min_depth, max_depth=app_state.max_depth,
+        )
+        app_state.repos = new_repos
         return roots, new_repos
 
     # ------------------------------------------------------------------

@@ -23,6 +23,7 @@ from . import config as config_mod
 from . import scanner as scanner_mod
 from . import server as server_mod
 from .server import Handler
+from .state import AppState
 
 logger = logging.getLogger(__name__)
 
@@ -140,16 +141,20 @@ def main():
         logger.error("index.html not found at %s", html_path)
         sys.exit(1)
 
-    # --- Configure handler --------------------------------------------
-    Handler.repos = repos
-    Handler.html_path = html_path
-    Handler.static_dir = static_dir
-    Handler.config_path = args.config
-    Handler.min_depth = min_depth
-    Handler.max_depth = max_depth
-    # Remember whether depth was set via CLI so hot-reload doesn't override it.
-    Handler.cli_min_depth = args.min_depth
-    Handler.cli_max_depth = args.max_depth
+    # --- Configure handler (AppState) ----------------------------------
+    state = AppState(
+        repos=repos,
+        html_path=html_path,
+        static_dir=static_dir,
+        config_path=args.config,
+        min_depth=min_depth,
+        max_depth=max_depth,
+        # Remember whether depth was set via CLI so hot-reload doesn't override it.
+        cli_min_depth=args.min_depth,
+        cli_max_depth=args.max_depth,
+    )
+    # Share state with the server module (read by every Handler instance).
+    server_mod.app_state = state
 
     # --- Authentication token -----------------------------------------
     # T-011: generate a random token and include it in the URL.
@@ -157,7 +162,7 @@ def main():
     token = secrets.token_urlsafe(16)
     server_mod.AUTH_TOKEN = token
 
-    server = _create_server(port)
+    httpd = _create_server(port)
     url = f"http://127.0.0.1:{port}/?token={token}"
     logger.info("serving at http://127.0.0.1:%d/?token=<hidden>", port)
     logger.info(
@@ -169,10 +174,10 @@ def main():
         threading.Timer(0.5, lambda: _try_open_browser(url)).start()
 
     try:
-        server.serve_forever()
+        httpd.serve_forever()
     except KeyboardInterrupt:
         logger.info("shutting down")
-        server.shutdown()
+        httpd.shutdown()
 
 
 def _try_open_browser(url):

@@ -1,4 +1,10 @@
-"""Git operations — thin wrappers around the ``git`` CLI."""
+"""Git operations — thin wrappers around the ``git`` CLI.
+
+This module is **HTTP-agnostic**: it knows nothing about HTTP status codes,
+URLs, or request handlers.  All functions return plain Python objects
+(dataclasses, dicts, tuples); the server layer is responsible for
+translating them into HTTP responses.
+"""
 
 import logging
 import os
@@ -6,8 +12,54 @@ import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, field
+from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Repo dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Repo:
+    """A single git repository discovered by the scanner.
+
+    Use :meth:`as_dict` when serializing for the frontend.
+    """
+
+    name: str
+    path: str
+    root_label: str = ""
+    default_branch: Optional[str] = None
+
+    # Extra scanner-cached attributes can be added via this catch-all.
+    extras: dict = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        """Return a plain dict representation for the frontend."""
+        d = asdict(self)
+        # Flatten extras into the top level for backwards compatibility.
+        extras = d.pop("extras", {})
+        d.update(extras)
+        return d
+
+
+@dataclass
+class ActionOutcome:
+    """Domain-level result of a git action (HTTP-agnostic).
+
+    The server layer translates :attr:`ok` / :attr:`status` into an HTTP
+    status code.
+    """
+
+    ok: bool
+    output: str = ""
+    status: str = "ok"  # "ok" | "not_found" | "bad_request" | "skipped"
+
+    def as_dict(self) -> dict:
+        return {"ok": self.ok, "output": self.output}
 
 # Default per-command timeout for status/diff/ref queries.  Generous enough
 # for large repos, but prevents one hung git process (dead network mount,
@@ -93,8 +145,14 @@ def repo_status(repo):
     repo.  A failed command degrades to the same conservative answer as
     before (dirty + detached), so a broken repo still surfaces as needing
     attention instead of looking healthy.
+
+    Accepts both :class:`Repo` instances and plain dicts for backwards
+    compatibility during the transition.
     """
-    path = repo["path"]
+    path = _repo_path(repo)
+    name = _repo_name(repo)
+    root_label = repo.root_label if isinstance(repo, Repo) else repo.get("root_label")
+    default_branch = repo.default_branch if isinstance(repo, Repo) else repo.get("default_branch")
 
     rc, out, _ = run_git(path, "status", "--porcelain=v2", "--branch")
     if rc == 0:
@@ -105,14 +163,11 @@ def repo_status(repo):
     branch = parsed["branch"]
     # T-021: scan_roots caches the probe result on the repo record; fall back
     # to a live probe for records built by other paths (tests, actions).
-    if "default_branch" in repo:
-        default = repo["default_branch"]
-    else:
-        default = _default_branch(path)
+    default = default_branch if default_branch is not None else _default_branch(path)
     return {
-        "name": repo["name"],
-        "path": repo["path"],
-        "root_label": repo.get("root_label"),
+        "name": name,
+        "path": path,
+        "root_label": root_label,
         "branch": branch,
         "dirty": parsed["dirty"],
         "detached": parsed["detached"],
@@ -137,23 +192,52 @@ def get_repos_status(repos):
         return list(ex.map(repo_status, repos.values()))
 
 
-def pull_one(repo, q):
-    """Pull a single repo, pushing progress events to *q*."""
-    name = repo["name"]
-    path = repo["path"]
-    q.put({"repo": name, "status": "running"})
+def _repo_path(repo) -> str:
+    """Extract the filesystem path from a repo (dataclass or dict)."""
+    if isinstance(repo, Repo):
+        return repo.path
+    return repo["path"]
 
+
+def _repo_name(repo) -> str:
+    """Extract the display name from a repo (dataclass or dict)."""
+    if isinstance(repo, Repo):
+        return repo.name
+    return repo["name"]
+
+
+def safe_pull_check(path: str):
+    """Check whether it is safe to pull *path*.
+
+    Returns ``(can_pull, reason)`` where *can_pull* is True when the repo
+    is on a branch with a clean working tree, and *reason* is a human
+    readable explanation when *can_pull* is False.
+
+    Shared between :func:`pull_one` (used by pull-all jobs) and
+    :func:`do_action` (used by per-card pull) so the skip logic never
+    drifts apart.
+    """
     rc, _, _ = run_git(path, "diff", "--quiet")
     if rc != 0:
-        q.put({"repo": name, "status": "skipped", "message": "uncommitted changes (unstaged)"})
-        return
+        return False, "uncommitted changes (unstaged)"
     rc, _, _ = run_git(path, "diff", "--cached", "--quiet")
     if rc != 0:
-        q.put({"repo": name, "status": "skipped", "message": "uncommitted changes (staged)"})
-        return
+        return False, "uncommitted changes (staged)"
     _, branch_out, _ = run_git(path, "symbolic-ref", "--short", "-q", "HEAD")
     if branch_out.strip() == "":
-        q.put({"repo": name, "status": "skipped", "message": "detached HEAD"})
+        return False, "detached HEAD"
+    return True, ""
+
+
+def pull_one(repo, q):
+    """Pull a single repo, pushing progress events to *q*."""
+    name = _repo_name(repo)
+    path = _repo_path(repo)
+    q.put({"repo": name, "status": "running"})
+
+    can_pull, reason = safe_pull_check(path)
+    if not can_pull:
+        q.put({"repo": name, "status": "skipped", "message": reason})
         return
 
     rc, out, err = run_git(path, "pull", "--ff-only", timeout=PULL_TIMEOUT)
@@ -178,7 +262,7 @@ def get_diff(path, repos):
     repo = repos.get(path)
     if not repo:
         return None
-    repo_path = repo["path"]
+    repo_path = _repo_path(repo)
     _, tracked_diff, _ = run_git(repo_path, "diff", "HEAD", "--", ".")
     _, status_out, _ = run_git(repo_path, "status", "--porcelain")
     untracked = [line[3:] for line in status_out.splitlines() if line.startswith("??")]
@@ -192,21 +276,22 @@ def get_diff(path, repos):
     return {"diff": tracked_diff, "untracked": untracked, "truncated": truncated}
 
 
-def do_action(path, action, repos):
-    """Execute a named action on a repo. Returns (http_status, result_dict)."""
+def do_action(path: str, action: str, repos) -> ActionOutcome:
+    """Execute a named action on a repo.
+
+    Returns an :class:`ActionOutcome` with ``ok``, ``output``, and
+    ``status`` fields.  **HTTP-agnostic** — the server layer decides what
+    status code to return based on ``outcome.status``.
+    """
     repo = repos.get(path)
     if not repo:
-        return 404, {"ok": False, "output": "unknown repo"}
-    repo_path = repo["path"]
+        return ActionOutcome(ok=False, output="unknown repo", status="not_found")
+    repo_path = _repo_path(repo)
 
     if action == "pull":
-        rc_u, _, _ = run_git(repo_path, "diff", "--quiet")
-        rc_s, _, _ = run_git(repo_path, "diff", "--cached", "--quiet")
-        if rc_u != 0 or rc_s != 0:
-            return 200, {"ok": False, "output": "skipped: uncommitted changes"}
-        _, branch_out, _ = run_git(repo_path, "symbolic-ref", "--short", "-q", "HEAD")
-        if branch_out.strip() == "":
-            return 200, {"ok": False, "output": "skipped: detached HEAD"}
+        can_pull, reason = safe_pull_check(repo_path)
+        if not can_pull:
+            return ActionOutcome(ok=False, output=f"skipped: {reason}", status="skipped")
         rc, out, err = run_git(repo_path, "pull", "--ff-only", timeout=PULL_TIMEOUT)
     elif action == "stash":
         rc, out, err = run_git(repo_path, "stash", "push", "-u", "-m", "harbor")
@@ -217,18 +302,22 @@ def do_action(path, action, repos):
     elif action == "checkout-main":
         target = _default_branch(repo_path)
         if not target:
-            return 200, {"ok": False, "output": "no default branch found"}
+            return ActionOutcome(ok=False, output="no default branch found", status="skipped")
         rc, out, err = run_git(repo_path, "checkout", target)
     elif action == "open-vscode":
         code_bin = shutil.which("code")
         if not code_bin:
-            return 200, {"ok": False, "output": "VS Code 'code' command not found. Run 'Shell Command: Install code command in PATH' from VS Code first."}
+            return ActionOutcome(
+                ok=False,
+                output="VS Code 'code' command not found. Run 'Shell Command: Install code command in PATH' from VS Code first.",
+                status="skipped",
+            )
         subprocess.Popen([code_bin, repo_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return 200, {"ok": True, "output": f"code {repo_path}"}
+        return ActionOutcome(ok=True, output=f"code {repo_path}", status="ok")
     else:
-        return 400, {"ok": False, "output": f"unknown action: {action}"}
+        return ActionOutcome(ok=False, output=f"unknown action: {action}", status="bad_request")
 
-    return 200, {"ok": rc == 0, "output": (out + err).strip()}
+    return ActionOutcome(ok=(rc == 0), output=(out + err).strip(), status="ok")
 
 
 def _default_branch(path):

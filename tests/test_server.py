@@ -17,6 +17,7 @@ import pytest as _pytest
 
 from harbor import config as config_mod
 from harbor import server
+from harbor.state import AppState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,23 +76,19 @@ def _read_response(handler):
 
 
 @pytest.fixture(autouse=True)
-def _restore_handler_state():
-    """Snapshot the Handler class-attribute state and restore after each test."""
-    saved = {
-        "repos": dict(server.Handler.repos),
-        "html_path": server.Handler.html_path,
-        "config_path": server.Handler.config_path,
-        "min_depth": server.Handler.min_depth,
-        "max_depth": server.Handler.max_depth,
-        "cli_min_depth": server.Handler.cli_min_depth,
-        "cli_max_depth": server.Handler.cli_max_depth,
-    }
+@pytest.fixture(autouse=True)
+def _fresh_app_state():
+    """Replace ``server.app_state`` with a clean :class:`AppState` per test.
+
+    This eliminates the previous snapshot/restore pattern: each test gets
+    its own state object, so there is no risk of cross-test contamination
+    through class attributes.  Disables auth token checks by default so
+    individual tests don't have to supply tokens.
+    """
+    server.app_state = AppState()
     saved_token = server.AUTH_TOKEN
-    # Default: no auth required (tests don't send tokens)
     server.AUTH_TOKEN = None
     yield
-    for k, v in saved.items():
-        setattr(server.Handler, k, v)
     server.AUTH_TOKEN = saved_token
 
 
@@ -100,7 +97,7 @@ def _restore_handler_state():
 # ---------------------------------------------------------------------------
 
 def test_post_bad_json_returns_400(tmp_path):
-    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.app_state.config_path = str(tmp_path / "config.toml")
     h = _make_handler("POST", "/api/rescan", body=b"{not json")
     h.do_POST()
     status, body = _read_response(h)
@@ -115,8 +112,8 @@ def test_post_bad_json_returns_400(tmp_path):
 
 def test_post_rescan_returns_shape(tmp_path):
     config_path = str(tmp_path / "config.toml")
-    server.Handler.config_path = config_path
-    server.Handler.repos = {}
+    server.app_state.config_path = config_path
+    server.app_state.repos = {}
 
     h = _make_handler("POST", "/api/rescan", body=b"{}")
     h.do_POST()
@@ -143,7 +140,7 @@ def test_post_roots_duplicate_returns_409(tmp_path):
     config_mod.save_config(str(config_path), {
         "roots": [{"path": str(tmp_path), "label": "X"}],
     })
-    server.Handler.config_path = str(config_path)
+    server.app_state.config_path = str(config_path)
 
     payload = json.dumps({"path": str(tmp_path), "label": "Y"}).encode()
     h = _make_handler("POST", "/api/roots", body=payload)
@@ -158,7 +155,7 @@ def test_post_roots_adds_new_path(tmp_path):
     """A new path is added to the config; the response includes its label."""
     config_path = tmp_path / "config.toml"
     config_mod.save_config(str(config_path), {"roots": []})
-    server.Handler.config_path = str(config_path)
+    server.app_state.config_path = str(config_path)
     new_path = str(tmp_path / "newdir")
     os.makedirs(new_path)
 
@@ -188,7 +185,7 @@ def test_delete_root_by_path(tmp_path):
             {"path": str(b), "label": "Beta"},
         ],
     })
-    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.app_state.config_path = str(tmp_path / "config.toml")
 
     h = _make_handler("DELETE", f"/api/roots/{a}", body=b"")
     h.do_DELETE()
@@ -213,7 +210,7 @@ def test_delete_root_by_path_handles_duplicate_labels(tmp_path):
             {"path": str(b), "label": "SameLabel"},
         ],
     })
-    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.app_state.config_path = str(tmp_path / "config.toml")
 
     # Delete only the first — second must remain even with the same label
     h = _make_handler("DELETE", f"/api/roots/{a}", body=b"")
@@ -226,7 +223,7 @@ def test_delete_root_by_path_handles_duplicate_labels(tmp_path):
 def test_delete_root_missing_returns_404(tmp_path):
     config_path = tmp_path / "config.toml"
     config_mod.save_config(str(config_path), {"roots": []})
-    server.Handler.config_path = str(config_path)
+    server.app_state.config_path = str(config_path)
 
     h = _make_handler("DELETE", f"/api/roots/{tmp_path}/nope", body=b"")
     h.do_DELETE()
@@ -241,8 +238,8 @@ def test_delete_root_missing_returns_404(tmp_path):
 
 def test_action_cross_origin_returns_403(tmp_path):
     """A POST with a foreign Origin is rejected before any git op runs."""
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
 
     headers = {
         "Origin": "https://evil.example",
@@ -261,8 +258,8 @@ def test_action_cross_origin_returns_403(tmp_path):
 
 def test_action_no_origin_allows_through(tmp_path):
     """A POST without Origin or Referer is allowed (same-origin or curl)."""
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}  # unknown path → 404, not 403
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}  # unknown path → 404, not 403
 
     h = _make_handler(
         "POST", "/api/repo/missing/action",
@@ -276,8 +273,8 @@ def test_action_no_origin_allows_through(tmp_path):
 
 def test_action_same_origin_allows_through(tmp_path):
     """A POST whose Origin matches Host is allowed."""
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}  # unknown path → 404, not 403
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}  # unknown path → 404, not 403
 
     headers = {
         "Origin": "http://127.0.0.1:8765",
@@ -305,8 +302,8 @@ def test_action_same_origin_allows_through(tmp_path):
 ])
 def test_mutating_routes_reject_cross_origin(tmp_path, method, path, body):
     """Every POST/DELETE route rejects cross-origin requests — not just one."""
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
 
     headers = {
         "Origin": "https://evil.example",
@@ -324,8 +321,8 @@ def test_mutating_routes_reject_cross_origin(tmp_path, method, path, body):
 
 def test_get_requests_skip_origin_check(tmp_path):
     """GET requests are not subject to origin validation (read-only)."""
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
     headers = {
         "Origin": "https://evil.example",
         "Host": "127.0.0.1:8765",
@@ -345,8 +342,8 @@ def test_get_requests_skip_origin_check(tmp_path):
 def test_api_without_token_returns_403_when_auth_enabled(tmp_path):
     """When AUTH_TOKEN is set, API calls without a token get 403."""
     server.AUTH_TOKEN = "secret123"
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
 
     h = _make_handler("GET", "/api/repos", body=b"")
     h.do_GET()
@@ -359,8 +356,8 @@ def test_api_without_token_returns_403_when_auth_enabled(tmp_path):
 def test_api_with_correct_token_returns_200(tmp_path):
     """When AUTH_TOKEN is set and the query has the right token, request proceeds."""
     server.AUTH_TOKEN = "secret123"
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
 
     h = _make_handler("GET", "/api/repos?token=secret123", body=b"")
     h.do_GET()
@@ -372,8 +369,8 @@ def test_api_with_correct_token_returns_200(tmp_path):
 def test_api_with_wrong_token_returns_403(tmp_path):
     """Wrong token value is rejected."""
     server.AUTH_TOKEN = "secret123"
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
 
     h = _make_handler("GET", "/api/repos?token=wrong", body=b"")
     h.do_GET()
@@ -405,8 +402,8 @@ def test_static_and_root_exempt_from_token_auth(tmp_path):
 def test_post_action_with_token(tmp_path):
     """POST requests also accept token via query string."""
     server.AUTH_TOKEN = "secret123"
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
 
     h = _make_handler("POST", "/api/rescan?token=secret123", body=b"{}")
     h.do_POST()
@@ -418,8 +415,8 @@ def test_post_action_with_token(tmp_path):
 def test_bearer_token_auth(tmp_path):
     """Token can also be passed via Authorization: Bearer header."""
     server.AUTH_TOKEN = "secret123"
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
 
     headers = {"Authorization": "Bearer secret123"}
     h = _make_handler("GET", "/api/repos", body=b"", headers=headers)
@@ -432,8 +429,8 @@ def test_bearer_token_auth(tmp_path):
 def test_no_auth_token_means_no_auth_required(tmp_path):
     """When AUTH_TOKEN is None, no token is needed (backwards compatible)."""
     assert server.AUTH_TOKEN is None  # fixture default
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
 
     h = _make_handler("GET", "/api/repos", body=b"")
     h.do_GET()
@@ -468,7 +465,7 @@ def test_index_serves_csp_header(tmp_path):
     """Root page serves HTML with a CSP header."""
     html_file = tmp_path / "index.html"
     html_file.write_text("<html></html>")
-    server.Handler.html_path = str(html_file)
+    server.app_state.html_path = str(html_file)
     h = _make_handler("GET", "/", body=b"")
     h.do_GET()
     headers = _response_headers(h)
@@ -481,7 +478,7 @@ def test_static_file_serves_csp_header(tmp_path, monkeypatch):
     static_dir = tmp_path / "static"
     static_dir.mkdir()
     (static_dir / "test.js").write_text("console.log(1)")
-    monkeypatch.setattr(server.Handler, "static_dir", str(static_dir))
+    monkeypatch.setattr(server.app_state, "static_dir", str(static_dir))
     h = _make_handler("GET", "/static/test.js", body=b"")
     h.do_GET()
     headers = _response_headers(h)
@@ -491,8 +488,8 @@ def test_static_file_serves_csp_header(tmp_path, monkeypatch):
 
 
 def test_json_response_serves_csp_header(tmp_path):
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
     h = _make_handler("GET", "/api/repos", body=b"")
     h.do_GET()
     headers = _response_headers(h)
@@ -511,7 +508,7 @@ def test_action_response_includes_fresh_status(tmp_path):
     from tests.test_harbor import init_repo
     init_repo(tmp_path / "r")
     path = str(tmp_path / "r")
-    server.Handler.repos = {path: {"name": "r", "path": path}}
+    server.app_state.repos = {path: {"name": "r", "path": path}}
 
     h = _make_handler("POST", f"/api/repo/{path}/action",
                       body=b'{"action":"stash"}')
@@ -526,8 +523,8 @@ def test_action_response_includes_fresh_status(tmp_path):
 
 
 def test_action_unknown_repo_has_no_status(tmp_path):
-    server.Handler.config_path = str(tmp_path / "config.toml")
-    server.Handler.repos = {}
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
     h = _make_handler("POST", "/api/repo/nonexistent/action",
                       body=b'{"action":"pull"}')
     h.do_POST()
@@ -605,9 +602,9 @@ def _drain_queue(job_id, timeout=2.0):
 def test_repo_route_matches_url_encoded_path(tmp_path):
     """`/api/repo/<path with />/diff` decodes into a single path argument."""
     from urllib.parse import quote
-    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.app_state.config_path = str(tmp_path / "config.toml")
     # Empty repos → get_diff returns None → handler sends 404
-    server.Handler.repos = {}
+    server.app_state.repos = {}
 
     encoded = quote("/Users/x/work/api", safe="")
     h = _make_handler("GET", f"/api/repo/{encoded}/diff", body=b"")
@@ -627,7 +624,7 @@ def test_delete_root_url_encoded_path(tmp_path):
     config_mod.save_config(str(tmp_path / "config.toml"), {
         "roots": [{"path": str(a), "label": "SpaceDir"}],
     })
-    server.Handler.config_path = str(tmp_path / "config.toml")
+    server.app_state.config_path = str(tmp_path / "config.toml")
 
     from urllib.parse import quote
     h = _make_handler("DELETE", f"/api/roots/{quote(str(a))}", body=b"")
@@ -767,12 +764,12 @@ def _start_real_server(monkeypatch, tmp_path):
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text("min_depth = 1\nmax_depth = 3\n")
-    server.Handler.config_path = str(config_path)
-    server.Handler.html_path = str(tmp_path / "index.html")
+    server.app_state.config_path = str(config_path)
+    server.app_state.html_path = str(tmp_path / "index.html")
     (tmp_path / "index.html").write_text("<html></html>")
-    server.Handler.static_dir = str(tmp_path / "static")
+    server.app_state.static_dir = str(tmp_path / "static")
     (tmp_path / "static").mkdir(exist_ok=True)
-    server.Handler.repos = {}
+    server.app_state.repos = {}
 
     def noop_pull(repo, q):
         q.put({"done": True})
