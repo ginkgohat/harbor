@@ -43,6 +43,14 @@ It's also intentionally simple: one Python file + one HTML file. No build step, 
 # Install from GitHub
 pip install git+https://github.com/ginkgohat/harbor.git
 
+# Update to the latest version
+pip install --upgrade git+https://github.com/ginkgohat/harbor.git
+
+# Uninstall
+pip uninstall harbor
+```
+
+```bash
 # Run — scan the current directory
 harbor
 
@@ -51,6 +59,21 @@ harbor ~/projects
 
 # Or scan multiple directories
 harbor ~/work ~/personal ~/oss
+```
+
+Harbor also has built-in update and uninstall commands:
+
+```bash
+harbor update       # Upgrade Harbor to the latest version
+harbor uninstall    # Remove Harbor from your system
+```
+
+### Background mode
+
+```bash
+harbor start        # Start Harbor in the background
+harbor status       # Check if Harbor is running
+harbor stop         # Stop the background Harbor instance
 ```
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765) — or let Harbor open it for you.

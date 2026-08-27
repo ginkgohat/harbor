@@ -20,7 +20,9 @@ import webbrowser
 
 from . import __version__
 from . import config as config_mod
+from . import daemon as daemon_mod
 from . import scanner as scanner_mod
+from . import selfmanage as selfmanage_mod
 from . import server as server_mod
 from .server import Handler
 from .state import AppState
@@ -49,52 +51,200 @@ def _create_server(port: int) -> http.server.ThreadingHTTPServer:
         raise
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argument parser with subcommands.
+
+    To preserve backward compatibility, ``harbor [ROOT ...] [flags]`` still
+    works and runs the server — the default subcommand is ``serve``.
+    """
     parser = argparse.ArgumentParser(
+        prog="harbor",
         description="Harbor — local web dashboard for managing multiple git repos.",
-    )
-    parser.add_argument(
-        "roots",
-        nargs="*",
-        metavar="ROOT",
-        help="One or more directories to scan for git repos. "
-             "If omitted, reads from the config file or falls back to the current directory.",
-    )
-    parser.add_argument(
-        "--config",
-        default=os.environ.get("HARBOR_CONFIG", str(config_mod.CONFIG_PATH)),
-        help="Path to config file (default: ~/.config/harbor/config.toml).",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="HTTP port (default: 8765, env: HARBOR_PORT).",
-    )
-    parser.add_argument(
-        "--min-depth",
-        type=int,
-        default=None,
-        help="Minimum directory depth to scan (default: 1).",
-    )
-    parser.add_argument(
-        "--max-depth",
-        type=int,
-        default=None,
-        help="Maximum directory depth to scan (default: 5).",
-    )
-    parser.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="Do not open the browser automatically.",
     )
     parser.add_argument(
         "--version",
         action="version",
         version=f"harbor {__version__}",
     )
-    args = parser.parse_args()
 
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    # --- serve (default) ---------------------------------------------
+    serve = subparsers.add_parser(
+        "serve",
+        help="Start the Harbor web dashboard (default).",
+        description="Start the Harbor web dashboard.",
+    )
+    serve.add_argument(
+        "roots",
+        nargs="*",
+        metavar="ROOT",
+        help="One or more directories to scan for git repos. "
+             "If omitted, reads from the config file or falls back to the current directory.",
+    )
+    serve.add_argument(
+        "--config",
+        default=os.environ.get("HARBOR_CONFIG", str(config_mod.CONFIG_PATH)),
+        help="Path to config file (default: ~/.config/harbor/config.toml).",
+    )
+    serve.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="HTTP port (default: 8765, env: HARBOR_PORT).",
+    )
+    serve.add_argument(
+        "--min-depth",
+        type=int,
+        default=None,
+        help="Minimum directory depth to scan (default: 1).",
+    )
+    serve.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help="Maximum directory depth to scan (default: 5).",
+    )
+    serve.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the browser automatically.",
+    )
+
+    # --- update ------------------------------------------------------
+    subparsers.add_parser(
+        "update",
+        help="Upgrade Harbor to the latest version from GitHub.",
+        description="Upgrade Harbor to the latest version from GitHub.",
+    )
+
+    # --- uninstall ---------------------------------------------------
+    subparsers.add_parser(
+        "uninstall",
+        help="Uninstall Harbor from the current Python environment.",
+        description="Uninstall Harbor from the current Python environment.",
+    )
+
+    # --- start -------------------------------------------------------
+    start = subparsers.add_parser(
+        "start",
+        help="Start Harbor in the background (daemon mode).",
+        description="Start Harbor in the background (daemon mode).",
+    )
+    start.add_argument(
+        "roots",
+        nargs="*",
+        metavar="ROOT",
+        help="One or more directories to scan for git repos.",
+    )
+    start.add_argument(
+        "--config",
+        default=os.environ.get("HARBOR_CONFIG", str(config_mod.CONFIG_PATH)),
+        help="Path to config file (default: ~/.config/harbor/config.toml).",
+    )
+    start.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="HTTP port (default: 8765, env: HARBOR_PORT).",
+    )
+    start.add_argument(
+        "--min-depth",
+        type=int,
+        default=None,
+        help="Minimum directory depth to scan (default: 1).",
+    )
+    start.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help="Maximum directory depth to scan (default: 5).",
+    )
+    start.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the browser automatically (implied in daemon mode).",
+    )
+
+    # --- status ------------------------------------------------------
+    subparsers.add_parser(
+        "status",
+        help="Check if Harbor is running in the background.",
+        description="Check if Harbor is running in the background.",
+    )
+
+    # --- stop --------------------------------------------------------
+    subparsers.add_parser(
+        "stop",
+        help="Stop a background Harbor instance.",
+        description="Stop a background Harbor instance.",
+    )
+
+    return parser
+
+
+def _parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
+    """Parse args, falling back to ``serve`` when no subcommand is given.
+
+    Rules:
+    - If the first non-flag arg is a known subcommand, parse normally.
+    - If the first arg is ``-h`` / ``--help`` / ``--version``, show the
+      top-level help (which lists all subcommands).
+    - Otherwise, treat everything as positional args / flags for ``serve``
+      so that ``harbor ~/projects`` and ``harbor --port 9000`` still work.
+    """
+    subcommands = {"serve", "update", "uninstall", "start", "status", "stop"}
+    flag_like = {"-h", "--help", "--version"}
+
+    # Find the first non-flag argument (doesn't start with "-").
+    first_positional = None
+    for arg in sys.argv[1:]:
+        if not arg.startswith("-"):
+            first_positional = arg
+            break
+
+    if first_positional is not None and first_positional in subcommands:
+        # Explicit subcommand — parse normally.
+        return parser.parse_args()
+
+    if first_positional is None and any(a in flag_like for a in sys.argv[1:]):
+        # No subcommand and user is asking for top-level help / version.
+        return parser.parse_args()
+
+    # Default to "serve".
+    argv = [sys.argv[0], "serve", *sys.argv[1:]]
+    return parser.parse_args(argv[1:])
+
+
+def main():
+    parser = _build_parser()
+    args = _parse_args(parser)
+
+    # --- Dispatch subcommands ----------------------------------------
+    if args.command == "update":
+        sys.exit(selfmanage_mod.cmd_self_update())
+
+    if args.command == "uninstall":
+        sys.exit(selfmanage_mod.cmd_self_uninstall())
+
+    if args.command == "start":
+        sys.exit(daemon_mod.cmd_start(args))
+
+    if args.command == "status":
+        sys.exit(daemon_mod.cmd_status())
+
+    if args.command == "stop":
+        sys.exit(daemon_mod.cmd_stop())
+
+    # --- serve (default) ---------------------------------------------
+    sys.exit(_run_server(args))
+
+
+def _run_server(args) -> int:
+    """Actually start the HTTP server.  Shared by foreground and daemon modes.
+
+    Returns an exit code (0 for normal shutdown).
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -178,6 +328,8 @@ def main():
     except KeyboardInterrupt:
         logger.info("shutting down")
         httpd.shutdown()
+
+    return 0
 
 
 def _try_open_browser(url):

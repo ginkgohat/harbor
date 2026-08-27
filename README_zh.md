@@ -43,6 +43,14 @@ Harbor 就是为这而生的。它是个小面板，**一眼看完所有仓库�
 # 从 GitHub 安装
 pip install git+https://github.com/ginkgohat/harbor.git
 
+# 更新到最新版本
+pip install --upgrade git+https://github.com/ginkgohat/harbor.git
+
+# 卸载
+pip uninstall harbor
+```
+
+```bash
 # 运行 — 扫描当前目录
 harbor
 
@@ -51,6 +59,21 @@ harbor ~/projects
 
 # 或扫描多个目录
 harbor ~/work ~/personal ~/oss
+```
+
+Harbor 也内置了更新和卸载命令：
+
+```bash
+harbor update       # 升级 Harbor 到最新版本
+harbor uninstall    # 从系统中卸载 Harbor
+```
+
+### 后台运行
+
+```bash
+harbor start        # 后台启动 Harbor
+harbor status       # 查看 Harbor 运行状态
+harbor stop         # 停止后台运行的 Harbor
 ```
 
 打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，或者让 Harbor 自动打开浏览器。
