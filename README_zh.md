@@ -37,9 +37,11 @@ Harbor 就是为这而生的。它是个小面板，**一眼看完所有仓库�
 
 ## 快速开始
 
+> **注意**：PyPI 上的 `harbor` 是另一个项目，请从 GitHub 安装：
+
 ```bash
-# 安装
-pip install harbor
+# 从 GitHub 安装
+pip install git+https://github.com/ginkgohat/harbor.git
 
 # 运行 — 扫描当前目录
 harbor
@@ -53,7 +55,7 @@ harbor ~/work ~/personal ~/oss
 
 打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)，或者让 Harbor 自动打开浏览器。
 
-### 从源码运行
+### 从源码运行（开发模式）
 
 ```bash
 git clone https://github.com/ginkgohat/harbor.git

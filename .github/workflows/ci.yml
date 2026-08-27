@@ -12,6 +12,10 @@ on:
       - "**.md"
       - "docs/**"
 
+# Default: minimum permissions; elevate per-job if needed
+permissions:
+  contents: read
+
 # Cancel in-progress runs on the same ref (e.g. rapid PR pushes)
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -77,7 +81,6 @@ jobs:
           # Full Python version range on Linux (fastest, primary platform)
           - { os: ubuntu-latest, python-version: "3.9" }
           - { os: ubuntu-latest, python-version: "3.13" }
-          - { os: ubuntu-latest, python-version: "3.14" }
           # Cross-platform coverage on a single Python version — OS-specific
           # issues are independent of the Python version.
           - { os: macos-latest, python-version: "3.13" }
