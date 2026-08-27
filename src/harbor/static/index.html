@@ -86,6 +86,91 @@
     }
   }
 
+  /* T-044: explicit data-theme overrides (take precedence over system setting) */
+  :root[data-theme="light"] {
+    --bg: #f5f5f7;
+    --card: #fff;
+    --card-border: rgba(0,0,0,.06);
+    --hairline: rgba(0,0,0,.08);
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --faint: #aeaeb2;
+    --accent: #0071e3;
+    --accent-soft: rgba(0,113,227,.1);
+    --success: #248a3d;
+    --success-soft: rgba(52,199,89,.14);
+    --warning: #c26100;
+    --warning-soft: rgba(255,149,0,.14);
+    --danger: #d70015;
+    --danger-soft: rgba(255,59,48,.12);
+    --purple: #5856d6;
+    --purple-soft: rgba(88,86,214,.14);
+    --vscode: #007acc;
+    --vscode-soft: rgba(0,122,204,.14);
+    --shadow-1: 0 1px 2px rgba(0,0,0,.04);
+    --shadow-2: 0 10px 30px rgba(0,0,0,.08);
+    --header-bg: rgba(245,245,247,.78);
+    --modal-bg: rgba(255,255,255,.92);
+    --modal-overlay: rgba(0,0,0,.32);
+    --seg-bg: rgba(0,0,0,.05);
+    --seg-on: #fff;
+    --search-bg: rgba(0,0,0,.04);
+    --search-focus-bg: #fff;
+    --icon-btn-bg: rgba(0,0,0,.045);
+    --synced-item-bg: rgba(0,0,0,.03);
+    --synced-item-hover: rgba(0,0,0,.055);
+    --diff-bg: #fbfbfc;
+    --terminal-bg: rgba(30,30,32,.92);
+    --ghost-bg: rgba(0,0,0,.05);
+    --ghost-hover: rgba(0,0,0,.08);
+  }
+  :root[data-theme="dark"] {
+    --bg: #1c1c1e;
+    --card: #2c2c2e;
+    --card-border: rgba(255,255,255,.08);
+    --hairline: rgba(255,255,255,.1);
+    --text: #f5f5f7;
+    --muted: #98989d;
+    --faint: #636366;
+    --accent: #0a84ff;
+    --accent-soft: rgba(10,132,255,.18);
+    --success: #30d158;
+    --success-soft: rgba(48,209,88,.18);
+    --warning: #ff9f0a;
+    --warning-soft: rgba(255,159,10,.18);
+    --danger: #ff453a;
+    --danger-soft: rgba(255,69,58,.18);
+    --purple: #a78bfa;
+    --purple-soft: rgba(167,139,250,.18);
+    --vscode: #4da6ff;
+    --vscode-soft: rgba(77,166,255,.18);
+    --shadow-1: 0 1px 2px rgba(0,0,0,.2);
+    --shadow-2: 0 10px 30px rgba(0,0,0,.4);
+    --header-bg: rgba(28,28,30,.78);
+    --modal-bg: rgba(44,44,46,.92);
+    --modal-overlay: rgba(0,0,0,.55);
+    --seg-bg: rgba(255,255,255,.08);
+    --seg-on: #3a3a3c;
+    --search-bg: rgba(255,255,255,.06);
+    --search-focus-bg: #3a3a3c;
+    --icon-btn-bg: rgba(255,255,255,.06);
+    --synced-item-bg: rgba(255,255,255,.04);
+    --synced-item-hover: rgba(255,255,255,.08);
+    --diff-bg: #1c1c1e;
+    --terminal-bg: rgba(18,18,20,.92);
+    --ghost-bg: rgba(255,255,255,.06);
+    --ghost-hover: rgba(255,255,255,.1);
+  }
+
+  /* Focus styles for keyboard navigation (T-043) */
+  button:focus-visible,
+  input:focus-visible,
+  [role="button"]:focus-visible,
+  .synced-strip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
   * { box-sizing: border-box; }
   html, body {
     margin: 0;
@@ -492,7 +577,7 @@ body.term-open main { padding-bottom: 260px; }
     <div class="toolbar">
       <div class="search-wrap">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input class="search" id="search" />
+        <input class="search" id="search" aria-label="Filter repositories" />
       </div>
       <div class="segmented" id="viewToggle">
         <button class="on" data-view="attention"></button>
@@ -505,15 +590,19 @@ body.term-open main { padding-bottom: 260px; }
         <button class="on" data-lang="zh">中</button>
         <button data-lang="en">EN</button>
       </div>
+      <button class="settings-btn" id="themeBtn" title="Theme" aria-label="Toggle theme">
+        <svg class="i-sun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg class="i-moon" style="display:none" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+      </button>
       <button class="btn-primary" id="pullAllBtn">
         <svg class="still" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v5h5"/><path d="M20 20v-5h-5"/><path d="M5.5 9A7 7 0 0119 10"/><path d="M18.5 15A7 7 0 015 14"/></svg>
         <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-opacity=".3"/><path d="M21 12a9 9 0 00-9-9"/></svg>
         <span id="pullAllLabel"></span>
       </button>
-      <button class="settings-btn" id="refreshBtn" title="Refresh">
+      <button class="settings-btn" id="refreshBtn" title="Refresh" aria-label="Refresh repos">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15A9 9 0 015.64 18.36L1 14"/></svg>
       </button>
-      <button class="settings-btn" id="settingsBtn" title="Settings">
+      <button class="settings-btn" id="settingsBtn" title="Settings" aria-label="Open settings">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
       </button>
     </div>
@@ -540,8 +629,8 @@ body.term-open main { padding-bottom: 260px; }
   </div>
 </main>
 
-<div id="modalOverlay">
-  <div id="modal">
+<div id="modalOverlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalBody">
+  <div id="modal" tabindex="-1">
     <h3 id="modalTitle"></h3>
     <p id="modalBody"></p>
     <code id="modalCmd"></code>
@@ -709,6 +798,18 @@ const cssId = (name) => "r-" + encodeURIComponent(name);
 const escHTML = (s) => s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const escAttr = (s) => s.replace(/[&"]/g, c => (c === "&" ? "&amp;" : "&quot;"));
 
+// T-011 — auth token read from the URL query string.
+// The server requires ?token= on every API request to prevent CSRF,
+// DNS rebinding, and local process attacks.
+const _urlParams = new URLSearchParams(window.location.search);
+const AUTH_TOKEN = _urlParams.get("token");
+
+function _withToken(url) {
+  if (!AUTH_TOKEN) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return url + sep + "token=" + encodeURIComponent(AUTH_TOKEN);
+}
+
 function renderStatic() {
   document.documentElement.lang = lang;
   $("#search").placeholder = t("searchPh");
@@ -738,6 +839,114 @@ $("#langToggle").addEventListener("click", (e) => {
   render();
 });
 
+/* ---------- theme toggle (T-044) ---------- */
+// Three states: "system" (follow OS), "light", "dark"
+// Stored in localStorage under "harborTheme".
+let theme = localStorage.getItem("harborTheme") || "system";
+
+function applyTheme(t) {
+  if (t === "system") {
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.setAttribute("data-theme", t);
+  }
+  // Update icon: sun visible in light, moon in dark
+  const isDark = t === "dark" || (t === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.querySelector("#themeBtn .i-sun").style.display = isDark ? "none" : "block";
+  document.querySelector("#themeBtn .i-moon").style.display = isDark ? "block" : "none";
+}
+
+function cycleTheme() {
+  theme = theme === "system" ? "light" : theme === "light" ? "dark" : "system";
+  localStorage.setItem("harborTheme", theme);
+  applyTheme(theme);
+  const btn = $("#themeBtn");
+  if (theme === "system") btn.title = "Theme: system";  // simplified
+  else if (theme === "light") btn.title = "Theme: light";
+  else btn.title = "Theme: dark";
+}
+
+$("#themeBtn").addEventListener("click", cycleTheme);
+applyTheme(theme);
+
+// Also react to system theme changes when in "system" mode
+if (window.matchMedia) {
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (theme === "system") applyTheme("system");
+  });
+}
+
+/* ---------- modal focus trap (T-043) ---------- */
+let _lastFocused = null;
+let _originalAskConfirm = askConfirm;
+let _originalCloseModal = closeModal;
+
+askConfirm = function(title, body, cmd, onConfirm) {
+  _lastFocused = document.activeElement;
+  _originalAskConfirm(title, body, cmd, onConfirm);
+  // Focus the confirm button after opening
+  requestAnimationFrame(() => {
+    const cancelBtn = $("#modalCancel");
+    if (cancelBtn) cancelBtn.focus();
+  });
+};
+
+closeModal = function() {
+  _originalCloseModal();
+  // Return focus to the element that opened the modal
+  if (_lastFocused && _lastFocused.focus) _lastFocused.focus();
+  _lastFocused = null;
+};
+
+// Trap Tab inside the modal when open
+document.addEventListener("keydown", (e) => {
+  const overlay = $("#modalOverlay");
+  if (!overlay.classList.contains("show")) return;
+  if (e.key !== "Tab") return;
+
+  const focusable = overlay.querySelectorAll(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  );
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+});
+
+/* ---------- synced strip keyboard support (T-043) ---------- */
+// Make the synced strip focusable and activatable with Enter/Space
+function _initSyncedStripA11y() {
+  const strip = $("#syncedStrip");
+  if (!strip || strip.getAttribute("role")) return;  // already initialized
+  strip.setAttribute("role", "button");
+  strip.setAttribute("tabindex", "0");
+  strip.setAttribute("aria-expanded", "false");
+  strip.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      strip.click();
+    }
+  });
+  // Update aria-expanded on click
+  const observer = new MutationObserver(() => {
+    const list = $("#syncedList");
+    if (list) {
+      strip.setAttribute("aria-expanded", list.classList.contains("show") ? "true" : "false");
+    }
+  });
+  const list = $("#syncedList");
+  if (list) observer.observe(list, { attributes: true, attributeFilter: ["class"] });
+}
+// Initialize after first render
+setTimeout(_initSyncedStripA11y, 100);
+
 
 /* ---------- refresh / rescan ---------- */
 $("#refreshBtn").addEventListener("click", async () => {
@@ -745,7 +954,7 @@ $("#refreshBtn").addEventListener("click", async () => {
   btn.disabled = true;
   btn.style.opacity = "0.5";
   try {
-    const res = await fetch("/api/rescan", { method: "POST", signal: AbortSignal.timeout(30000) });
+    const res = await fetch(_withToken("/api/rescan"), { method: "POST", signal: AbortSignal.timeout(30000) });
     const data = await res.json();
     if (data.ok) {
       await loadRepos();
@@ -791,7 +1000,7 @@ document.addEventListener("visibilitychange", () => {
 
 async function loadRepos() {
   try {
-    const res = await fetch("/api/repos", { signal: AbortSignal.timeout(15000) });
+    const res = await fetch(_withToken("/api/repos"), { signal: AbortSignal.timeout(15000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     repos = await res.json();
     render();
@@ -1000,13 +1209,13 @@ $("#pullAllBtn").addEventListener("click", async () => {
 
   document.querySelectorAll(".card").forEach(c => c.dataset.state = "idle");
 
-  const res = await fetch("/api/pull-all", { method: "POST" });
+  const res = await fetch(_withToken("/api/pull-all"), { method: "POST" });
   const { job_id } = await res.json();
   pullJobActive = true;
   const total = repos.length;
   let done = 0;
 
-  const es = new EventSource(`/api/stream?job=${job_id}`);
+  const es = new EventSource(_withToken(`/api/stream?job=${job_id}`));
   let retries = 0;
   es.onmessage = (ev) => {
     retries = 0;
@@ -1131,7 +1340,7 @@ async function openDiff(name, path) {
   $("#diffBody").innerHTML = `<div class="d-empty">${t("diffLoadingBody")}</div>`;
   $("#diffOverlay").classList.add("show");
 
-  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/diff`);
+  const res = await fetch(_withToken(`/api/repo/${encodeURIComponent(path)}/diff`));
   if (!res.ok) {
     $("#diffBody").innerHTML = `<div class="d-empty">${t("diffLoadFail")}</div>`;
     $("#diffSub").textContent = "";
@@ -1168,7 +1377,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#diffOv
 
 async function runAction(name, path, action) {
   termLine(`<span class="r">$</span> ${escHTML(name)}: ${action}`);
-  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/action`, {
+  const res = await fetch(_withToken(`/api/repo/${encodeURIComponent(path)}/action`), {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action }),
   });
@@ -1189,7 +1398,7 @@ async function singlePull(name, path, btn) {
   btn.disabled = true;
   setCardStatus(name, "running");
   termLine(`<span class="r">$</span> git -C ${escHTML(name)} pull --ff-only`);
-  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/action`, {
+  const res = await fetch(_withToken(`/api/repo/${encodeURIComponent(path)}/action`), {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "pull" }),
   });
@@ -1220,7 +1429,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 async function renderSettingsRoots() {
-  const res = await fetch("/api/roots");
+  const res = await fetch(_withToken("/api/roots"));
   const roots = await res.json();
   $("#settingsRoots").innerHTML = roots.length ? roots.map(r => `
     <div class="root-item">
@@ -1238,7 +1447,7 @@ $("#settingsRoots").addEventListener("click", async (e) => {
   const btn = e.target.closest(".del-btn");
   if (!btn) return;
   // Match by path (B-3) — the contract is symmetric with POST /api/roots.
-  await fetch(`/api/roots/${encodeURIComponent(btn.dataset.path)}`, { method: "DELETE" });
+  await fetch(_withToken(`/api/roots/${encodeURIComponent(btn.dataset.path)}`), { method: "DELETE" });
   await renderSettingsRoots();
   await loadRepos();
 });
@@ -1252,7 +1461,7 @@ $("#browseQuick").addEventListener("click", (e) => {
 });
 
 async function loadBrowse(path) {
-  const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+  const res = await fetch(_withToken(`/api/browse?path=${encodeURIComponent(path)}`));
   const data = await res.json();
   browsePath = data.path;
   renderBrowsePath(data);
@@ -1301,7 +1510,7 @@ $("#browseList").addEventListener("click", async (e) => {
 });
 
 async function addRoot(path, label) {
-  const res = await fetch("/api/roots", {
+  const res = await fetch(_withToken("/api/roots"), {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, label }),
   });
