@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint (ruff + JS syntax)
+    name: Lint (ruff + JS)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -40,6 +40,11 @@ jobs:
 
       - name: JS syntax check
         run: node --check src/harbor/static/harbor-utils.js
+
+      # JS unit tests are OS/Python-independent, so run them once here
+      # instead of repeating them in every test matrix job.
+      - name: Run frontend JS tests
+        run: node tests/frontend/test-utils.js
 
   build:
     name: Build & Package
@@ -68,8 +73,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.13", "3.14"]
+        include:
+          # Full Python version range on Linux (fastest, primary platform)
+          - { os: ubuntu-latest, python-version: "3.9" }
+          - { os: ubuntu-latest, python-version: "3.13" }
+          - { os: ubuntu-latest, python-version: "3.14" }
+          # Cross-platform coverage on a single Python version — OS-specific
+          # issues are independent of the Python version.
+          - { os: macos-latest, python-version: "3.13" }
+          - { os: windows-latest, python-version: "3.13" }
 
     steps:
       - name: Checkout code
@@ -93,6 +105,3 @@ jobs:
       # `make test` step would just duplicate the work.
       - name: Run tests with coverage
         run: make coverage PYTHON=python
-
-      - name: Run frontend JS tests
-        run: node tests/frontend/test-utils.js
