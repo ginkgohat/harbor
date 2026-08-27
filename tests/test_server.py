@@ -740,6 +740,11 @@ def test_sse_stream_emits_done_and_job_is_cleaned_up(monkeypatch, tmp_path):
         assert len(events) >= 1
         assert events[-1].get("done") is True
 
+        # Job cleanup happens in the handler thread after writing the done
+        # event — wait briefly for it to be removed (avoids flaky races).
+        deadline = time.time() + 2
+        while job_id in server.JOBS and time.time() < deadline:
+            time.sleep(0.01)
         assert job_id not in server.JOBS
     finally:
         srv.shutdown()

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: help run dev test coverage coverage-html lint format build build-check clean
+.PHONY: help run dev test test-js coverage coverage-html lint format build build-check clean
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -13,6 +13,10 @@ dev:    ## Install in development mode with dev extras (requires pip)
 
 test:   ## Run tests
 	PYTHONPATH=src $(PYTHON) -m pytest tests/ -v
+
+test-js: ## Run frontend JS tests + syntax check
+	@node --check src/harbor/static/harbor-utils.js && echo "harbor-utils.js: syntax OK"
+	@node tests/frontend/test-utils.js
 
 coverage:  ## Run tests with coverage report (fails if below threshold in pyproject.toml)
 	PYTHONPATH=src $(PYTHON) -m pytest tests/ --cov=harbor --cov-report=term-missing
