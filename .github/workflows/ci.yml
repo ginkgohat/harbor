@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint (ruff)
+    name: Lint (ruff + JS syntax)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -37,6 +37,9 @@ jobs:
 
       - name: Ruff check
         run: make lint PYTHON=python
+
+      - name: JS syntax check
+        run: node --check src/harbor/static/harbor-utils.js
 
   build:
     name: Build & Package
@@ -90,3 +93,6 @@ jobs:
       # `make test` step would just duplicate the work.
       - name: Run tests with coverage
         run: make coverage PYTHON=python
+
+      - name: Run frontend JS tests
+        run: node tests/frontend/test-utils.js

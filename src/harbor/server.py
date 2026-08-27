@@ -1,5 +1,7 @@
 """HTTP server — routes, SSE streaming, and static file serving."""
 
+from __future__ import annotations
+
 import http.server
 import json
 import logging

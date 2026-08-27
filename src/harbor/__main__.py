@@ -6,6 +6,8 @@ Usage:
     python -m harbor               # equivalent to `harbor`
 """
 
+from __future__ import annotations
+
 import argparse
 import contextlib
 import http.server
