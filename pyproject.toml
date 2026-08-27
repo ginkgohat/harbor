@@ -34,7 +34,7 @@ harbor = "harbor.__main__:main"
 dev = ["pytest>=7", "pytest-timeout", "ruff", "pytest-cov", "build>=1", "twine", "mypy", "pre-commit", "hypothesis>=6", "pytest-playwright"]
 
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8"]
+requires = ["setuptools>=64", "setuptools-scm>=10.2.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
