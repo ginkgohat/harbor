@@ -11,20 +11,23 @@ run:    ## Run Harbor (current directory)
 dev:    ## Install in development mode with dev extras (requires pip)
 	$(PYTHON) -m pip install -e ".[dev]" --break-system-packages 2>/dev/null || $(PYTHON) -m pip install -e ".[dev]"
 
-test:   ## Run tests
-	PYTHONPATH=src $(PYTHON) -m pytest tests/ -v
+test:   ## Run tests (unit + integration, excludes e2e)
+	PYTHONPATH=src $(PYTHON) -m pytest tests/ -v -m 'not e2e'
+
+test-e2e:  ## Run end-to-end browser tests (requires playwright)
+	PYTHONPATH=src $(PYTHON) -m pytest tests/e2e/ -m e2e --browser chromium
 
 test-js: ## Run frontend JS tests + syntax check
 	@node --check src/harbor/static/harbor-utils.js && echo "harbor-utils.js: syntax OK"
 	@node tests/frontend/test-utils.js
 
-coverage:  ## Run tests with coverage report (fails if below threshold in pyproject.toml)
-	PYTHONPATH=src $(PYTHON) -m pytest tests/ --cov=harbor --cov-report=term-missing
+coverage:  ## Run tests with coverage report (fails if below threshold in pyproject.toml, excludes e2e)
+	PYTHONPATH=src $(PYTHON) -m pytest tests/ -m 'not e2e' --cov=harbor --cov-report=term-missing
 	@# Second pass uses `coverage report` which reliably exits non-zero below fail_under
 	PYTHONPATH=src $(PYTHON) -m coverage report > /dev/null
 
-coverage-html:  ## Run tests and generate HTML coverage report in htmlcov/
-	PYTHONPATH=src $(PYTHON) -m pytest tests/ --cov=harbor --cov-report=html --cov-report=term-missing
+coverage-html:  ## Run tests and generate HTML coverage report in htmlcov/ (excludes e2e)
+	PYTHONPATH=src $(PYTHON) -m pytest tests/ -m 'not e2e' --cov=harbor --cov-report=html --cov-report=term-missing
 	@echo "Open htmlcov/index.html in your browser to view the report."
 
 lint:   ## Run lint checks (ruff + mypy)
