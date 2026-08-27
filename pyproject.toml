@@ -41,7 +41,7 @@ dev = [
     "twine",
     "mypy",
     "pre-commit",
-    "hypothesis>=6",
+    "hypothesis>=6.165.10",
     "pytest-playwright",
 ]
 
