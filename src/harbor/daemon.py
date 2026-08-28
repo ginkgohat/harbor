@@ -23,6 +23,8 @@ from platformdirs import user_state_dir
 STATE_DIR = Path(user_state_dir("harbor", appauthor=False))
 PID_FILE = STATE_DIR / "harbor.pid"
 LOG_FILE = STATE_DIR / "harbor.log"
+TOKEN_FILE = STATE_DIR / "harbor.token"
+PORT_FILE = STATE_DIR / "harbor.port"
 
 
 def _read_pid() -> int | None:
@@ -43,9 +45,13 @@ def _write_pid(pid: int) -> None:
 
 
 def _remove_pid() -> None:
-    """Remove the PID file if it exists."""
+    """Remove the PID / token / port files if they exist."""
     with suppress(FileNotFoundError):
         PID_FILE.unlink()
+    with suppress(FileNotFoundError):
+        TOKEN_FILE.unlink()
+    with suppress(FileNotFoundError):
+        PORT_FILE.unlink()
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -198,6 +204,19 @@ def cmd_status() -> int:
 
     print(f"Harbor is running (PID {pid}){started_str}.")
     print(f"  Log:    {LOG_FILE}")
+    # Show the auth token and URL if state files exist.
+    try:
+        token = TOKEN_FILE.read_text().strip()
+        port = None
+        with suppress(OSError, ValueError):
+            port = int(PORT_FILE.read_text().strip())
+        if token:
+            if port:
+                print(f"  URL:    http://127.0.0.1:{port}/?token={token}")
+            print(f"  Token:  {token}")
+            print("  ⚠  Keep this private — it grants full access to Harbor.")
+    except OSError:
+        pass
     print("  Stop with:  harbor stop")
     return 0
 

@@ -559,6 +559,86 @@ body.term-open main { padding-bottom: 260px; }
   }
   .browse-list .browse-item:hover .select-btn { opacity: 1; }
   .browse-list .browse-empty { font-size: 12px; color: var(--faint); padding: 20px 0; text-align: center; }
+
+  /* ---------- auth / token gate ---------- */
+  #authOverlay {
+    position: fixed; inset: 0; z-index: 200;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--modal-overlay);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    opacity: 0; pointer-events: none; transition: opacity .2s ease;
+  }
+  #authOverlay.show { opacity: 1; pointer-events: auto; }
+  #authCard {
+    width: 100%; max-width: 360px;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    padding: 36px 32px 28px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.25);
+    text-align: center;
+    transform: translateY(10px) scale(.98);
+    transition: transform .25s cubic-bezier(.2,.8,.2,1);
+  }
+  #authOverlay.show #authCard { transform: translateY(0) scale(1); }
+  .auth-logo { display: flex; justify-content: center; margin-bottom: 14px; }
+  .auth-title {
+    margin: 0 0 4px; font-size: 22px; font-weight: 700; letter-spacing: -.4px;
+  }
+  .auth-sub { margin: 0 0 24px; color: var(--muted); font-size: 13.5px; }
+  #authForm { display: flex; flex-direction: column; gap: 12px; }
+  .auth-field input {
+    width: 100%; height: 36px; padding: 0 12px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--hairline); border-radius: 8px;
+    font-size: 13px; font-family: var(--mono);
+    outline: none; text-align: center;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .auth-field input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .auth-field input.invalid {
+    border-color: var(--danger);
+  }
+  .auth-field input.invalid:focus {
+    box-shadow: 0 0 0 3px var(--danger-soft);
+  }
+  .auth-field input::placeholder { color: var(--faint); font-family: var(--sans); }
+  .auth-btn {
+    height: 36px; border: none; border-radius: 8px;
+    background: var(--accent); color: #fff;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: filter .15s, transform .1s;
+  }
+  .auth-btn:hover { filter: brightness(1.08); }
+  .auth-btn:active { transform: scale(.98); }
+  .auth-error {
+    margin-top: 6px; text-align: left;
+    color: var(--danger); font-size: 12px; line-height: 1.4;
+    display: none;
+  }
+  .auth-error.show { display: block; }
+  .auth-help { margin-top: 20px; }
+  .auth-help summary {
+    font-size: 12px; color: var(--muted); cursor: pointer;
+    list-style: none; display: inline-block;
+    border-bottom: 1px dashed var(--faint);
+  }
+  .auth-help summary::-webkit-details-marker { display: none; }
+  .auth-help summary:hover { color: var(--text); border-color: var(--muted); }
+  .auth-help ul {
+    margin: 12px 0 0; padding: 0; list-style: none;
+    text-align: left; color: var(--muted); font-size: 12px; line-height: 1.8;
+  }
+  .auth-help li { padding-left: 16px; position: relative; }
+  .auth-help li::before { content: "·"; position: absolute; left: 4px; top: 0; color: var(--faint); font-weight: 700; }
+  .auth-help code {
+    font-family: var(--mono); font-size: 11px;
+    background: var(--accent-soft); color: var(--accent);
+    padding: 2px 6px; border-radius: 5px;
+  }
 </style>
 </head>
 <body>
@@ -688,6 +768,51 @@ body.term-open main { padding-bottom: 260px; }
   <div id="terminalBody"></div>
 </div>
 
+<!-- Auth gate — shown when no token in URL -->
+<div id="authOverlay">
+  <div id="authCard">
+    <div class="auth-logo">
+      <svg viewBox="0 0 120 120" width="52" height="52" aria-hidden="true">
+        <defs>
+          <linearGradient id="authBg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#0a84ff"/>
+            <stop offset="100%" stop-color="#0066cc"/>
+          </linearGradient>
+          <linearGradient id="authAnchor" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#ffffff"/>
+            <stop offset="100%" stop-color="#e0efff"/>
+          </linearGradient>
+        </defs>
+        <circle cx="60" cy="60" r="56" fill="url(#authBg)"/>
+        <g transform="translate(60, 54)" fill="none" stroke="url(#authAnchor)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="0" cy="-20" r="8"/>
+          <line x1="0" y1="-12" x2="0" y2="24"/>
+          <line x1="-14" y1="-4" x2="14" y2="-4"/>
+          <path d="M -14 -4 Q -22 4 -18 14 Q -14 12 -12 8"/>
+          <path d="M 14 -4 Q 22 4 18 14 Q 14 12 12 8"/>
+          <path d="M 0 24 L -6 32 L 0 36 L 6 32 Z" fill="url(#authAnchor)"/>
+        </g>
+      </svg>
+    </div>
+    <h1 class="auth-title">Harbor</h1>
+    <p class="auth-sub" id="authSub">Sign in to continue</p>
+    <form id="authForm">
+      <div class="auth-field">
+        <input id="authToken" type="text" autocomplete="off" spellcheck="false" placeholder="Access token" aria-label="Access token">
+        <div id="authError" class="auth-error"></div>
+      </div>
+      <button type="submit" class="auth-btn" id="authSignInBtn">Sign in</button>
+    </form>
+    <details class="auth-help">
+      <summary id="authLost">Lost your token?</summary>
+      <ul>
+        <li id="authHelp1">Run <code>harbor status</code> in your terminal</li>
+        <li id="authHelp2">Or check the startup output in the terminal where Harbor is running</li>
+      </ul>
+    </details>
+  </div>
+</div>
+
 <script>
 const ICONS = {
   pull: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg>`,
@@ -735,6 +860,13 @@ const STR = {
     connTimeout: "⚠️ 请求超时 —— 某个仓库的 git 命令可能卡住了",
     retry: "重试",
     connFailed: "连接失败",
+    badToken: "Token 无效，请重新输入",
+    authSub: "登录以继续",
+    authTokenPh: "访问令牌",
+    authSignIn: "登录",
+    authLost: "忘记 token？",
+    authHelp1: "在终端运行 <code>harbor status</code>",
+    authHelp2: "或查看运行 Harbor 的终端里的启动输出",
     settingsTitle: "仓库", addDirectory: "添加目录",
     noRoots: "还没有配置目录 —— 在下方添加",
     noSubdirs: "没有子目录",
@@ -775,6 +907,13 @@ const STR = {
     connTimeout: "⚠️ Request timed out — a repo's git command may be stuck",
     retry: "Retry",
     connFailed: "Connection failed",
+    badToken: "Invalid token, please try again",
+    authSub: "Sign in to continue",
+    authTokenPh: "Access token",
+    authSignIn: "Sign in",
+    authLost: "Lost your token?",
+    authHelp1: "Run <code>harbor status</code> in your terminal",
+    authHelp2: "Or check the startup output in the terminal where Harbor is running",
     settingsTitle: "Repositories", addDirectory: "Add directory",
     noRoots: "No roots configured yet — add one below.",
     noSubdirs: "No subdirectories",
@@ -802,12 +941,78 @@ const escAttr = (s) => s.replace(/[&"]/g, c => (c === "&" ? "&amp;" : "&quot;"))
 // The server requires ?token= on every API request to prevent CSRF,
 // DNS rebinding, and local process attacks.
 const _urlParams = new URLSearchParams(window.location.search);
-const AUTH_TOKEN = _urlParams.get("token");
+let AUTH_TOKEN = _urlParams.get("token");
 
 function _withToken(url) {
   if (!AUTH_TOKEN) return url;
   const sep = url.includes("?") ? "&" : "?";
   return url + sep + "token=" + encodeURIComponent(AUTH_TOKEN);
+}
+
+// --- Auth gate ---
+function showAuthError(msg) {
+  const err = document.getElementById("authError");
+  const input = document.getElementById("authToken");
+  if (err) { err.textContent = msg; err.classList.add("show"); }
+  if (input) input.classList.add("invalid");
+}
+
+function clearAuthError() {
+  const err = document.getElementById("authError");
+  const input = document.getElementById("authToken");
+  if (err) { err.textContent = ""; err.classList.remove("show"); }
+  if (input) input.classList.remove("invalid");
+}
+
+function showAuthGate(msg) {
+  const overlay = document.getElementById("authOverlay");
+  if (!overlay) return;
+  overlay.classList.add("show");
+  if (msg) showAuthError(msg);
+  setTimeout(() => {
+    const input = document.getElementById("authToken");
+    if (input) input.focus();
+  }, 200);
+}
+
+function hideAuthGate() {
+  const overlay = document.getElementById("authOverlay");
+  if (overlay) overlay.classList.remove("show");
+}
+
+function _setupAuthForm() {
+  const form = document.getElementById("authForm");
+  if (!form) return;
+  const input = document.getElementById("authToken");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const token = input.value.trim();
+    if (!token) { showAuthError(t("badToken")); return; }
+    clearAuthError();
+    try {
+      const res = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        // Update global state & URL, then dismiss the gate
+        AUTH_TOKEN = token;
+        clearAuthError();
+        const url = new URL(window.location);
+        url.searchParams.set("token", token);
+        window.history.replaceState({}, "", url.toString());
+        hideAuthGate();
+        loadRepos();
+      } else {
+        showAuthError(t("badToken"));
+        input.select();
+      }
+    } catch (_) {
+      showAuthError(t("connError"));
+    }
+  });
 }
 
 function renderStatic() {
@@ -827,6 +1032,13 @@ function renderStatic() {
   $('#rootFilter button[data-root=""]').textContent = t("segAll");
   $("#settingsTitle").textContent = t("settingsTitle");
   $("#browseLabel").textContent = t("addDirectory");
+  // Auth gate (token login)
+  $("#authSub").textContent = t("authSub");
+  $("#authToken").placeholder = t("authTokenPh");
+  $("#authSignInBtn").textContent = t("authSignIn");
+  $("#authLost").textContent = t("authLost");
+  $("#authHelp1").innerHTML = t("authHelp1");
+  $("#authHelp2").textContent = t("authHelp2");
 }
 
 $("#langToggle").addEventListener("click", (e) => {
@@ -1001,6 +1213,18 @@ document.addEventListener("visibilitychange", () => {
 async function loadRepos() {
   try {
     const res = await fetch(_withToken("/api/repos"), { signal: AbortSignal.timeout(15000) });
+    // Auth failures (401/403) mean the token is missing or wrong — show the
+    // token gate instead of treating it as a connection error.  Only add the
+    // "invalid token" hint when we actually had a (wrong) token in the URL.
+    if (res.status === 401 || res.status === 403) {
+      const hadToken = !!AUTH_TOKEN;
+      AUTH_TOKEN = null;
+      const url = new URL(window.location);
+      url.searchParams.delete("token");
+      window.history.replaceState({}, "", url.toString());
+      showAuthGate(hadToken ? t("badToken") : null);
+      return;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     repos = await res.json();
     render();
@@ -1008,10 +1232,16 @@ async function loadRepos() {
     console.error("loadRepos failed:", err);
     const msg = err.name === "TimeoutError" || err.name === "AbortError"
       ? t("connTimeout") : t("connError");
+    // Backend is unreachable — clear everything so no stale repo data or
+    // batch buttons (e.g. "discard all (N)") linger alongside the error.
+    repos = [];
     $("#attentionGrid").innerHTML =
       `<div class="empty">${msg}<br><button class="btn-block ghost" id="retryLoadBtn" style="margin-top:12px">${t("retry")}</button></div>`;
     $("#retryLoadBtn").addEventListener("click", loadRepos);
     $("#stats").textContent = t("connFailed");
+    $("#batchActions").innerHTML = "";
+    $("#syncedList").innerHTML = "";
+    $("#syncedCount").textContent = "0";
   }
 }
 
@@ -1522,7 +1752,12 @@ async function addRoot(path, label) {
 
 /* ---------- init ---------- */
 renderStatic();
-loadRepos();
+_setupAuthForm();
+if (!AUTH_TOKEN) {
+  showAuthGate();
+} else {
+  loadRepos();
+}
 </script>
 </body>
 </html>

@@ -83,6 +83,22 @@ def _get_index(self, m, parsed, body):
     self._serve_html()
 
 
+@_route("POST", r"^/login$")
+def _post_login(self, m, parsed, body):
+    """Token entry form submission.  On success, redirect to `/?token=...`."""
+    # Accept both form-encoded and JSON bodies.
+    if isinstance(body, dict):
+        token = (body.get("token") or "").strip()
+    else:
+        qs = parse_qs(body or "")
+        token = (qs.get("token") or [""])[0].strip()
+
+    if AUTH_TOKEN is None or token == AUTH_TOKEN:
+        self._send_json(200, {"ok": True, "redirect": "/?token=" + token})
+        return
+    self._send_json(401, {"ok": False, "error": "invalid token"})
+
+
 @_route("GET", r"^/static/(?P<name>[^/]+)$")
 def _get_static(self, m, parsed, body):
     self._serve_static_file(m.group("name"))
@@ -101,10 +117,8 @@ def _get_repos(self, m, parsed, body):
 
 @_route("GET", r"^/api/roots$")
 def _get_roots(self, m, parsed, body):
-    config = config_mod.load_config(app_state.config_path)
-    roots = config_mod.resolve_roots([], config)
     # Renamed `l` → `label` to clear the E741 lint.
-    self._send_json(200, [{"path": p, "label": label} for p, label in roots])
+    self._send_json(200, [{"path": p, "label": label} for p, label in app_state.roots])
 
 
 @_route("GET", r"^/api/browse$")
@@ -142,14 +156,18 @@ def _post_roots(self, m, parsed, body):
     if not path:
         self._send_json(400, {"ok": False, "error": "path is required"})
         return
-    config = config_mod.load_config(app_state.config_path) or {}
-    roots = config.setdefault("roots", [])
-    # Avoid duplicate paths
-    if any(r["path"] == path for r in roots):
+    # Add to in-memory roots (source of truth)
+    if any(p == path for p, _ in app_state.roots):
         self._send_json(409, {"ok": False, "error": "path already exists"})
         return
-    roots.append({"path": path, "label": label})
-    config_mod.save_config(app_state.config_path, config)
+    app_state.roots.append((path, label))
+    # Also persist to config file so it survives restarts when the user
+    # explicitly adds roots through the UI.
+    config = config_mod.load_config(app_state.config_path) or {}
+    roots_list = config.setdefault("roots", [])
+    if not any(r.get("path") == path for r in roots_list):
+        roots_list.append({"path": path, "label": label})
+        config_mod.save_config(app_state.config_path, config)
     self._rescan()
     self._send_json(200, {"ok": True, "path": path, "label": label})
 
@@ -185,18 +203,17 @@ def _post_repo_action(self, m, parsed, body):
 @_route("DELETE", r"^/api/roots/(?P<path>.+)$")
 def _delete_root(self, m, parsed, body):
     path = unquote(m.group("path"))
-    config = config_mod.load_config(app_state.config_path)
-    if not config or "roots" not in config:
-        self._send_json(404, {"ok": False, "error": "no roots configured"})
-        return
-    before = len(config["roots"])
-    # Match by path (not label) so the contract is symmetric with POST
-    # /api/roots which dedupes by path.
-    config["roots"] = [r for r in config["roots"] if r.get("path", "") != path]
-    if len(config["roots"]) == before:
+    # Remove from in-memory roots (source of truth)
+    before = len(app_state.roots)
+    app_state.roots = [(p, label) for p, label in app_state.roots if p != path]
+    if len(app_state.roots) == before:
         self._send_json(404, {"ok": False, "error": f"root '{path}' not found"})
         return
-    config_mod.save_config(app_state.config_path, config)
+    # Also remove from config file for persistence.
+    config = config_mod.load_config(app_state.config_path) or {}
+    if "roots" in config:
+        config["roots"] = [r for r in config["roots"] if r.get("path", "") != path]
+        config_mod.save_config(app_state.config_path, config)
     self._rescan()
     self._send_json(200, {"ok": True, "path": path})
 
@@ -414,12 +431,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             app_state.min_depth = config.get("min_depth", app_state.min_depth)
         if app_state.cli_max_depth is None:
             app_state.max_depth = config.get("max_depth", app_state.max_depth)
-        roots = config_mod.resolve_roots([], config)
         new_repos = scanner_mod.scan_roots(
-            roots, min_depth=app_state.min_depth, max_depth=app_state.max_depth,
+            app_state.roots, min_depth=app_state.min_depth, max_depth=app_state.max_depth,
         )
         app_state.repos = new_repos
-        return roots, new_repos
+        return app_state.roots, new_repos
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -430,9 +446,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         These paths are exempt from token auth so the browser can load the
         page normally (the token is in the URL query string read by JS).
+
+        `/login` is also exempt — otherwise users who arrived without a
+        token couldn't even submit the token-entry form.
         """
         path = parsed.path
-        return path == "/" or path == "/index.html" or path.startswith("/static/") or path == "/favicon.ico"
+        return (
+            path == "/"
+            or path == "/index.html"
+            or path == "/login"
+            or path.startswith("/static/")
+            or path == "/favicon.ico"
+        )
 
     def _check_token(self, parsed) -> bool:
         """Return True if the request has a valid auth token (or none is needed).

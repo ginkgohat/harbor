@@ -115,21 +115,19 @@ def save_config(path, config):
 
 
 def resolve_roots(cli_paths, config):
-    """Resolve the list of (path, label) roots from CLI + config.
+    """Resolve the list of (path, label) roots from CLI args.
 
-    Priority: CLI paths > config file [[roots]] > cwd.
+    - If CLI paths are given, use them.
+    - Otherwise, use the current working directory.
+
+    Rationale: ``harbor`` with no arguments should scan the current
+    directory — this matches user intuition (like ``ls`` or ``code .``)
+    and the README documentation.  Config-file roots are no longer
+    consulted by default; users who want persistent roots can pass them
+    explicitly on the command line or via a shell alias.
     """
     if cli_paths:
         return [(p, os.path.basename(os.path.realpath(os.path.expanduser(p)))) for p in cli_paths]
-
-    if config and "roots" in config:
-        roots = []
-        for entry in config["roots"]:
-            path = entry["path"]
-            expanded = os.path.realpath(os.path.expanduser(path))
-            label = entry.get("label", os.path.basename(expanded))
-            roots.append((path, label))
-        return roots
 
     return [(os.getcwd(), os.path.basename(os.getcwd()))]
 

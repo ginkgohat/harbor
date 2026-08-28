@@ -631,7 +631,8 @@ def test_migrate_legacy_noop_when_no_legacy(tmp_path, monkeypatch):
     assert not new_path.is_file()
 
 
-def test_resolve_roots_from_config():
+def test_resolve_roots_no_args_uses_cwd():
+    """No CLI args, even with a populated config → current directory."""
     config = {
         "roots": [
             {"path": "/a", "label": "A"},
@@ -639,12 +640,12 @@ def test_resolve_roots_from_config():
         ]
     }
     roots = resolve_roots([], config)
-    assert len(roots) == 2
-    assert roots[0] == ("/a", "A")
-    assert roots[1] == ("/b", "B")
+    assert len(roots) == 1
+    assert roots[0][0] == os.getcwd()
 
 
-def test_resolve_roots_cli_overrides():
+def test_resolve_roots_cli_paths():
+    """CLI paths are used as-is; config is ignored."""
     config = {"roots": [{"path": "/a", "label": "A"}]}
     roots = resolve_roots(["/x", "/y"], config)
     assert len(roots) == 2
@@ -653,6 +654,7 @@ def test_resolve_roots_cli_overrides():
 
 
 def test_resolve_roots_fallback():
+    """No args, no config → current directory."""
     roots = resolve_roots([], None)
     assert len(roots) == 1
     assert roots[0][0] == os.getcwd()

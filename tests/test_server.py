@@ -140,6 +140,8 @@ def test_post_roots_duplicate_returns_409(tmp_path):
         "roots": [{"path": str(tmp_path), "label": "X"}],
     })
     server.app_state.config_path = str(config_path)
+    # Memory is the source of truth — seed it so the duplicate check hits.
+    server.app_state.roots = [(str(tmp_path), "X")]
 
     payload = json.dumps({"path": str(tmp_path), "label": "Y"}).encode()
     h = _make_handler("POST", "/api/roots", body=payload)
@@ -151,10 +153,11 @@ def test_post_roots_duplicate_returns_409(tmp_path):
 
 
 def test_post_roots_adds_new_path(tmp_path):
-    """A new path is added to the config; the response includes its label."""
+    """A new path is added to config and in-memory state."""
     config_path = tmp_path / "config.toml"
     config_mod.save_config(str(config_path), {"roots": []})
     server.app_state.config_path = str(config_path)
+    server.app_state.roots = []
     new_path = str(tmp_path / "newdir")
     os.makedirs(new_path)
 
@@ -166,6 +169,8 @@ def test_post_roots_adds_new_path(tmp_path):
     assert body["ok"] is True
     assert body["path"] == new_path
     assert body["label"] == "NewDir"
+    # Verify in-memory roots were updated
+    assert any(p == new_path for p, _ in server.app_state.roots)
     # Verify config file was written
     cfg = config_mod.load_config(str(config_path))
     assert any(r["path"] == new_path for r in cfg["roots"])
@@ -185,6 +190,7 @@ def test_delete_root_by_path(tmp_path):
         ],
     })
     server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.roots = [(str(a), "Alpha"), (str(b), "Beta")]
 
     h = _make_handler("DELETE", f"/api/roots/{a}", body=b"")
     h.do_DELETE()
@@ -193,7 +199,10 @@ def test_delete_root_by_path(tmp_path):
     assert body["ok"] is True
     assert body["path"] == str(a)
 
-    # Config should now have only one root
+    # Memory should now have only one root
+    assert len(server.app_state.roots) == 1
+    assert server.app_state.roots[0][0] == str(b)
+    # Config should also have only one root
     config = config_mod.load_config(str(tmp_path / "config.toml"))
     assert len(config["roots"]) == 1
     assert config["roots"][0]["path"] == str(b)
@@ -210,10 +219,13 @@ def test_delete_root_by_path_handles_duplicate_labels(tmp_path):
         ],
     })
     server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.roots = [(str(a), "SameLabel"), (str(b), "SameLabel")]
 
     # Delete only the first — second must remain even with the same label
     h = _make_handler("DELETE", f"/api/roots/{a}", body=b"")
     h.do_DELETE()
+    assert len(server.app_state.roots) == 1
+    assert server.app_state.roots[0][0] == str(b)
     config = config_mod.load_config(str(tmp_path / "config.toml"))
     assert len(config["roots"]) == 1
     assert config["roots"][0]["path"] == str(b)
@@ -223,6 +235,7 @@ def test_delete_root_missing_returns_404(tmp_path):
     config_path = tmp_path / "config.toml"
     config_mod.save_config(str(config_path), {"roots": []})
     server.app_state.config_path = str(config_path)
+    server.app_state.roots = []
 
     h = _make_handler("DELETE", f"/api/roots/{tmp_path}/nope", body=b"")
     h.do_DELETE()
@@ -624,6 +637,7 @@ def test_delete_root_url_encoded_path(tmp_path):
         "roots": [{"path": str(a), "label": "SpaceDir"}],
     })
     server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.roots = [(str(a), "SpaceDir")]
 
     from urllib.parse import quote
     h = _make_handler("DELETE", f"/api/roots/{quote(str(a))}", body=b"")
@@ -634,11 +648,15 @@ def test_delete_root_url_encoded_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# C-1: CLI roots are persisted to config on startup
+# CLI roots are NOT persisted to config on startup (intentional)
 # ---------------------------------------------------------------------------
 
-def test_cli_roots_persist_to_config(tmp_path, monkeypatch):
-    """When the user passes roots on the CLI, they are written to config."""
+def test_cli_roots_not_persisted_to_config(tmp_path, monkeypatch):
+    """CLI roots are temporary — they are not written to config automatically.
+
+    Rationale: `harbor <path>` should behave like `ls <path>` — it scans
+    what you give it once, and doesn't mutate persistent state.
+    """
     from harbor.__main__ import main
 
     work_dir = tmp_path / "work"
@@ -664,12 +682,8 @@ def test_cli_roots_persist_to_config(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main()
 
-    # Config file should now contain the CLI root (realpath form)
-    config = config_mod.load_config(str(config_path))
-    assert config is not None
-    real = str(work_dir.resolve())
-    paths = [os.path.realpath(r["path"]) for r in config.get("roots", [])]
-    assert real in paths
+    # Config file should NOT have been created/modified just from CLI args.
+    assert not config_path.is_file() or "roots" not in (config_mod.load_config(str(config_path)) or {})
 
 
 # ---------------------------------------------------------------------------
