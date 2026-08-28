@@ -4,6 +4,8 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from harbor import daemon, selfmanage
 
 # ---------------------------------------------------------------------------
@@ -233,6 +235,9 @@ class TestCmdStart:
             captured = capsys.readouterr()
             assert "not supported" in captured.err
 
+    @pytest.mark.skipif(
+        not hasattr(os, "fork"), reason="requires fork (Unix-only)",
+    )
     def test_already_running_returns_zero(self, capsys, tmp_path, monkeypatch):
         pid_file = tmp_path / "harbor.pid"
         pid_file.write_text(str(os.getpid()))
