@@ -79,12 +79,13 @@ jobs:
       matrix:
         include:
           # Full Python version range on Linux (fastest, primary platform)
-          - { os: ubuntu-latest, python-version: "3.9" }
+          - { os: ubuntu-latest, python-version: "3.10" }
+          - { os: ubuntu-latest, python-version: "3.12" }
           - { os: ubuntu-latest, python-version: "3.13" }
-          # Cross-platform coverage on a single Python version — OS-specific
+          # Cross-platform coverage on 3.12 (main dev version) — OS-specific
           # issues are independent of the Python version.
-          - { os: macos-latest, python-version: "3.13" }
-          - { os: windows-latest, python-version: "3.13" }
+          - { os: macos-latest, python-version: "3.12" }
+          - { os: windows-latest, python-version: "3.12" }
 
     steps:
       - name: Checkout code

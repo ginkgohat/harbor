@@ -64,7 +64,7 @@ def _detect_install_kind() -> str:
     try:
         from importlib.metadata import PackageNotFoundError, distribution
     except ImportError:
-        # Python < 3.8 fallback — unlikely, since harbor requires >=3.9
+        # Python < 3.10 fallback — unlikely, since harbor requires >=3.10
         return "unknown"
 
     try:
