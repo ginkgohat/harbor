@@ -2,14 +2,9 @@
 
 import os
 import sys
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-import pytest
-
-from harbor import selfmanage
-from harbor import daemon
-
+from harbor import daemon, selfmanage
 
 # ---------------------------------------------------------------------------
 # selfmanage tests
@@ -229,12 +224,14 @@ class TestCmdStop:
 class TestCmdStart:
     def test_no_fork_platform_rejects(self, capsys):
         # Simulate a platform without fork by patching hasattr inside daemon.
-        with patch.object(daemon.os, "fork", create=True):  # ensure attribute exists
-            with patch("builtins.hasattr", return_value=False):
-                rc = daemon.cmd_start(MagicMock())
-                assert rc == 1
-                captured = capsys.readouterr()
-                assert "not supported" in captured.err
+        with (
+            patch.object(daemon.os, "fork", create=True),
+            patch("builtins.hasattr", return_value=False),
+        ):
+            rc = daemon.cmd_start(MagicMock())
+            assert rc == 1
+            captured = capsys.readouterr()
+            assert "not supported" in captured.err
 
     def test_already_running_returns_zero(self, capsys, tmp_path, monkeypatch):
         pid_file = tmp_path / "harbor.pid"
