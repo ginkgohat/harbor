@@ -107,5 +107,16 @@ jobs:
 
       # Single pass: coverage runs the full test suite, so a separate
       # `make test` step would just duplicate the work.
+      #
+      # shell: bash on every OS. The Makefile recipes are POSIX shell
+      # (`VAR=value cmd ...`), and on Windows the default pwsh wrapper runs with
+      # $ErrorActionPreference='stop', which can fail the step on stderr output
+      # even when make itself exits 0.
       - name: Run tests with coverage
-        run: make coverage PYTHON=python
+        shell: bash
+        run: |
+          set +e
+          make coverage PYTHON=python
+          status=$?
+          echo "make coverage exited with status=$status"
+          exit $status
