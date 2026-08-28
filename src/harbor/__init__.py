@@ -5,4 +5,4 @@ try:
 except ImportError:
     # Running from a source checkout without a build step — provide a
     # default so `import harbor` still works (tests, `python -m harbor`, ...).
-    __version__ = "0.0.0-dev"
+    __version__ = "0.1.0-dev"

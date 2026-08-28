@@ -13,7 +13,6 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ class Repo:
     name: str
     path: str
     root_label: str = ""
-    default_branch: Optional[str] = None
+    default_branch: str | None = None
 
     # Extra scanner-cached attributes can be added via this catch-all.
     extras: dict = field(default_factory=dict)

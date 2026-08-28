@@ -827,7 +827,7 @@ def _read_sse_events(base_url, job_id, max_events=100, timeout=3):
                         return events
             try:
                 chunk = sock.recv(1024)
-            except socket.timeout:
+            except TimeoutError:
                 break
             if not chunk:
                 break
