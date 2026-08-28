@@ -22,9 +22,9 @@ test-js: ## Run frontend JS tests + syntax check
 	@node tests/frontend/test-utils.js
 
 coverage:  ## Run tests with coverage report (fails if below threshold in pyproject.toml, excludes e2e)
+	@# pytest-cov enforces fail_under from [tool.coverage.report] and exits 1 when
+	@# the threshold is not met, so no second `coverage report` pass is needed.
 	PYTHONPATH=src $(PYTHON) -m pytest tests/ -m 'not e2e' --cov=harbor --cov-report=term-missing
-	@# Second pass uses `coverage report` which reliably exits non-zero below fail_under
-	PYTHONPATH=src $(PYTHON) -m coverage report > /dev/null
 
 coverage-html:  ## Run tests and generate HTML coverage report in htmlcov/ (excludes e2e)
 	PYTHONPATH=src $(PYTHON) -m pytest tests/ -m 'not e2e' --cov=harbor --cov-report=html --cov-report=term-missing
