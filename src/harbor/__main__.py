@@ -1,7 +1,7 @@
 """Entry point for Harbor — the local web dashboard for multi-repo management.
 
 Usage:
-    harbor                         # scan roots from config file, fallback to cwd
+    harbor                         # scan the current directory
     harbor ~/work ~/personal       # scan specific directories
     python -m harbor               # equivalent to `harbor`
 """
@@ -9,11 +9,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import http.server
 import logging
 import os
 import secrets
+import signal
 import sys
 import threading
 import webbrowser
@@ -80,7 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="*",
         metavar="ROOT",
         help="One or more directories to scan for git repos. "
-             "If omitted, reads from the config file or falls back to the current directory.",
+             "If omitted, scans the current directory.",
     )
     serve.add_argument(
         "--config",
@@ -263,22 +265,6 @@ def _run_server(args) -> int:
     roots = config_mod.resolve_roots(args.roots, config)
     repos = scanner_mod.scan_roots(roots, min_depth=min_depth, max_depth=max_depth)
 
-    # C-1: when the user passes roots on the CLI, persist them to the
-    # config file so that Rescan / GET /api/roots keep using them after
-    # the CLI args are gone.  Dedupe by realpath against existing config
-    # roots; don't touch the file when no CLI roots were given.
-    if args.roots:
-        config = config or {}
-        existing_paths = {os.path.realpath(os.path.expanduser(r["path"]))
-                          for r in config.get("roots", [])}
-        existing_paths = {p for p in existing_paths if p}
-        for path, label in roots:
-            real = os.path.realpath(os.path.expanduser(path))
-            if real and real not in existing_paths:
-                config.setdefault("roots", []).append({"path": real, "label": label})
-                existing_paths.add(real)
-        config_mod.save_config(args.config, config)
-
     for path, label in roots:
         count = sum(1 for r in repos.values() if r["root_label"] == label)
         logger.info("scanned %s (%s) — %d repo(s)", path, label, count)
@@ -294,6 +280,7 @@ def _run_server(args) -> int:
     # --- Configure handler (AppState) ----------------------------------
     state = AppState(
         repos=repos,
+        roots=roots,
         html_path=html_path,
         static_dir=static_dir,
         config_path=args.config,
@@ -306,11 +293,44 @@ def _run_server(args) -> int:
     # Share state with the server module (read by every Handler instance).
     server_mod.app_state = state
 
-    # --- Authentication token -----------------------------------------
+    # --- Authentication token + PID file -------------------------------
     # T-011: generate a random token and include it in the URL.
     # Protects against CSRF, DNS rebinding, and local process attacks.
     token = secrets.token_urlsafe(16)
     server_mod.AUTH_TOKEN = token
+
+    # Write PID + token to state files so `harbor status` works for both
+    # foreground and daemon mode.  In daemon mode the PID file was already
+    # written by daemon.py — overwriting with the same value is fine.
+    try:
+        from . import daemon as _daemon_mod
+        _daemon_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        # PID file (0644 — harmless, just a number)
+        _daemon_mod.PID_FILE.write_text(str(os.getpid()))
+        # Port file so `harbor status` can show the full URL
+        _daemon_mod.PORT_FILE.write_text(str(port))
+        # Token file (0600 — sensitive)
+        fd = os.open(
+            str(_daemon_mod.TOKEN_FILE),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+        # Clean up both on exit (works for foreground mode; daemon mode
+        # already has its own atexit handler registered in daemon.py).
+        atexit.register(_daemon_mod._remove_pid)
+    except OSError:
+        # Non-fatal — the token is still visible in the startup log.
+        pass
+
+    # Handle SIGTERM gracefully so atexit runs (cleaning up PID/token files)
+    # even when killed from outside (e.g. `kill <pid>` or `harbor stop`).
+    # On Windows, SIGTERM isn't available — skip silently.
+    if hasattr(signal, "SIGTERM"):
+        def _handle_sigterm(signum, frame):
+            raise SystemExit(0)
+        signal.signal(signal.SIGTERM, _handle_sigterm)
 
     httpd = _create_server(port)
     url = f"http://127.0.0.1:{port}/?token={token}"

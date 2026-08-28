@@ -21,6 +21,7 @@ class AppState:
 
     Attributes:
         repos: Mapping of repo path → :class:`Repo` (or dict, during transition).
+        roots: List of ``(path, label)`` tuples — the active scan roots.
         html_path: Filesystem path to ``index.html``.
         static_dir: Directory that holds static assets.
         config_path: Path to the TOML config file.
@@ -31,6 +32,7 @@ class AppState:
     """
 
     repos: dict = field(default_factory=dict)
+    roots: list = field(default_factory=list)
     html_path: str = ""
     static_dir: str = ""
     config_path: str = ""
