@@ -1,19 +1,3 @@
-## Type
-
-Pick one, and use it in the PR title too (`<type>: <short description>`):
-
-- [ ] feat — new feature or capability
-- [ ] fix — bug fix
-- [ ] docs — documentation only changes
-- [ ] style — formatting, missing semicolons, etc. (no logic change)
-- [ ] refactor — code change that neither fixes a bug nor adds a feature
-- [ ] perf — code change that improves performance
-- [ ] test — adding or correcting tests
-- [ ] chore — maintenance tasks, tooling, build config
-- [ ] ci — CI configuration changes
-- [ ] build — build system or external dependencies
-- [ ] revert — reverts a previous commit
-
 ## Description
 
 <!-- Describe what this PR changes and why. -->

@@ -46,7 +46,7 @@ Look for issues tagged **good first issue** if you're new to the project.
 
 ### Prerequisites
 
-- **Python 3.9 or newer** — Harbor uses only the Python standard library at runtime (zero pip dependencies). The only exception is `tomli` on Python < 3.11, which backports `tomllib`.
+- **Python 3.10 or newer** — Harbor uses only the Python standard library at runtime (zero pip dependencies). The only exception is `tomli` on Python < 3.11, which backports `tomllib`.
 - **Git** (obviously — it's a Git tool)
 - **pytest** and **pytest-timeout** — for running tests; installed via the `[dev]` extras (see below).
 
@@ -108,6 +108,14 @@ PYTHONPATH=src python3 -m pytest tests/test_harbor.py::test_find_repos_empty -v
 
 Tests create temporary git repositories in your OS temp directory. Everything cleans up automatically.
 
+The browser tests are separate: they are marked `e2e`, excluded from every other
+target, and **not run by CI** — so run them yourself when touching
+`src/harbor/static/` or the server routes.
+
+```bash
+make test-e2e    # installs the Chromium build first, then runs tests/e2e/
+```
+
 ### Running Harbor Locally
 
 Run `make run` (scans the current directory) or see [README](README.md#from-source) for other options.
@@ -147,9 +155,11 @@ harbor/
 ### Python
 
 - Follow [PEP 8](https://peps.python.org/pep-0008/) conventions
-- Use 4 spaces for indentation (no tabs)
+- Run `make format` before committing — it runs the same two ruff hooks as
+  pre-commit (`ruff check --fix`, then `ruff format`). The formatter is
+  authoritative on layout: indentation, line breaks, and quote style (it
+  normalizes to double quotes everywhere). Don't hand-format against it.
 - Keep lines under 88 characters where reasonable
-- Use double quotes for docstrings, single quotes otherwise (be consistent with surrounding code)
 - Type hints are encouraged but not required for simple functions
 - All public functions and modules should have docstrings
 
@@ -218,6 +228,16 @@ This project follows [Conventional Commits v1.0.0](https://www.conventionalcommi
 - **Summary** is required, in the imperative mood (e.g. "add", not "adds" or "added"), lowercase first letter, no period at the end.
 - **Scope** is optional — a noun describing the area of the codebase (e.g. `scanner`, `server`, `frontend`).
 - **Body** is optional but recommended for non-trivial changes. Explain *what* and *why*, not *how*.
+- **Keep the body short.** Prefer a handful of bullets wrapped at ~72
+  characters over paragraphs. The diff already shows what changed — the body is
+  for the reasoning a reader cannot reconstruct from it. If a bullet only
+  restates a line of the diff, drop it.
+- **One concern per commit.** In particular, keep mechanical changes
+  (reformatting, renames) out of commits that change behaviour. When a change
+  needs both, commit the mechanical part *first* — the behavioural diff on top
+  is then free of formatting noise and reviewable on its own.
+- **Never commit generated files.** `src/harbor/_version.py` is written by
+  setuptools-scm at build time and is gitignored; don't stage it with a glob.
 - **Breaking changes** are indicated by a `!` after the type/scope *and* a `BREAKING CHANGE:` footer.
 
 ### Common types
@@ -292,6 +312,22 @@ docs: update contributing guide with setup steps
    ```
 
 6. **Open a Pull Request** on GitHub. Fill out the PR template (if one exists) and describe what you changed and why.
+
+### Filling in the PR template
+
+`.github/pull_request_template.md` contains both content to fill in and
+instructions to you. The instructions are not part of the description:
+
+- The **Type** section is a chooser. Replace the whole list with the one type you
+  picked (`fix — bug fix`) — don't paste eleven options with one box ticked. The
+  type belongs in the PR title too.
+- `<!-- HTML comments -->` are prompts. Replace them with your answer, or write
+  `None.` — a comment left in place renders as nothing, so the section reads as
+  unanswered.
+- Leave the **checkboxes** in the testing, checklist, and breaking-change
+  sections: those are claims a reviewer scans, not instructions.
+- Same brevity rule as commit bodies: explain the reasoning a reader can't get
+  from the diff, and stop there.
 
 ### What happens next?
 
