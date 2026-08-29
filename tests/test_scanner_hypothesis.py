@@ -13,6 +13,7 @@ Invariants tested:
 """
 
 import os
+import tempfile
 
 import pytest
 from hypothesis import HealthCheck, given, settings
@@ -240,8 +241,12 @@ def test_root_level_repo_found(tmp_path, extra_repos):
 )
 def test_found_repos_leq_created(tmp_path, repo_paths):
     """We never find MORE repos than we created."""
-    root = str(tmp_path / "scan_root")
-    os.makedirs(root, exist_ok=True)
+    # tmp_path is function-scoped, so hypothesis hands every example the *same*
+    # directory.  This property counts repos, so leftovers from earlier examples
+    # would be scanned too and push the count above what this example created
+    # (an intermittent failure that hypothesis then reports as Flaky).  Give
+    # each example its own root; pytest still cleans up tmp_path afterwards.
+    root = tempfile.mkdtemp(dir=str(tmp_path))
 
     # Track unique real repo paths (some may collide via realpath)
     unique_repo_paths = set()

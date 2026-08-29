@@ -40,7 +40,7 @@ dev = [
     "mypy",
     "pre-commit",
     "hypothesis>=6.165.10",
-    "pytest-playwright",
+    "pytest-playwright>=0.9.0",
 ]
 
 [build-system]

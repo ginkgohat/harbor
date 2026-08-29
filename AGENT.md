@@ -44,10 +44,14 @@ make dev          # Install in dev mode (pytest, ruff, etc.)
 make run          # Run Harbor (scans current dir)
 make test         # Run Python tests
 make test-js      # Run JS tests + syntax check
+make test-e2e     # Run Playwright browser tests (installs Chromium first)
 make coverage     # Run tests with coverage (fails < 70%)
 make lint         # ruff check + mypy (mypy is informational only)
+make format       # ruff check --fix + ruff format (same as the pre-commit hooks)
 make build-check  # Build + twine check
 ```
+
+`make help` lists every target.
 
 Run a single test:
 

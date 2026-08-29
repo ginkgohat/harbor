@@ -701,7 +701,7 @@ body.term-open main { padding-bottom: 260px; }
 
   <div id="syncedSection">
     <div class="section-head"><div class="section-label" id="syncedLabel"></div></div>
-    <div class="synced-strip" id="syncedStrip">
+    <div class="synced-strip" id="syncedStrip" role="button" tabindex="0" aria-expanded="false" aria-controls="syncedList">
       <span><b id="syncedCount">0</b> <span id="syncedSuffix"></span></span>
       <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
     </div>
@@ -1403,9 +1403,20 @@ $("#rootFilter").addEventListener("click", (e) => {
 });
 
 /* ---------- synced strip expand ---------- */
-$("#syncedStrip").addEventListener("click", () => {
-  $("#syncedList").classList.toggle("show");
-  $("#syncedStrip").classList.toggle("open");
+/* The strip is a div, so it needs explicit keyboard handling to match the
+   role="button" contract: Enter and Space both toggle, and aria-expanded
+   tracks the open state for screen readers. */
+function toggleSyncedList() {
+  const open = $("#syncedList").classList.toggle("show");
+  $("#syncedStrip").classList.toggle("open", open);
+  $("#syncedStrip").setAttribute("aria-expanded", String(open));
+}
+$("#syncedStrip").addEventListener("click", toggleSyncedList);
+$("#syncedStrip").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();  // Space would otherwise scroll the page
+    toggleSyncedList();
+  }
 });
 
 /* ---------- terminal drawer ---------- */

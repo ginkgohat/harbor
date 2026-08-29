@@ -24,6 +24,7 @@ import pytest
 from harbor import config as config_mod
 from harbor import scanner as scanner_mod
 from harbor import server as server_mod
+from harbor.state import AppState
 
 pytestmark = pytest.mark.e2e
 
@@ -84,15 +85,21 @@ def server_url(tmp_path):
     # Scan repos
     repos = scanner_mod.scan_roots([(str(tmp_path), "test")], min_depth=1, max_depth=3)
 
-    # Configure server
+    # Configure server.  All mutable state lives in server.app_state
+    # (see harbor/state.py) — the handler reads it per request.
     static_dir = os.path.join(os.path.dirname(server_mod.__file__), "static")
     html_path = os.path.join(static_dir, "index.html")
-    server_mod.Handler.repos = repos
-    server_mod.Handler.html_path = html_path
-    server_mod.Handler.static_dir = static_dir
-    server_mod.Handler.config_path = str(config_path)
-    server_mod.Handler.min_depth = 1
-    server_mod.Handler.max_depth = 3
+    saved_state = server_mod.app_state
+    saved_token = server_mod.AUTH_TOKEN
+    server_mod.app_state = AppState(
+        repos=repos,
+        roots=[(str(tmp_path), "test")],
+        html_path=html_path,
+        static_dir=static_dir,
+        config_path=str(config_path),
+        min_depth=1,
+        max_depth=3,
+    )
     server_mod.AUTH_TOKEN = "test-token-123"
 
     port = _free_port()
@@ -115,6 +122,8 @@ def server_url(tmp_path):
     yield f"http://127.0.0.1:{port}", "test-token-123"
 
     httpd.shutdown()
+    server_mod.app_state = saved_state
+    server_mod.AUTH_TOKEN = saved_token
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +154,7 @@ def test_repo_cards_render(page, server_url):
     page.goto(f"{base_url}/?token={token}")
     # Wait for render
     page.wait_for_selector(".grid", timeout=5000)
-    cards = page.locator(".repo-card")
+    cards = page.locator(".card")
     count = cards.count()
     assert count >= 2, f"Expected at least 2 repo cards, got {count}"
 
@@ -156,7 +165,7 @@ def test_search_filters_repos(page, server_url):
     page.goto(f"{base_url}/?token={token}")
     page.wait_for_selector(".grid", timeout=5000)
 
-    total = page.locator(".repo-card").count()
+    total = page.locator(".card").count()
     assert total >= 2
 
     # Search for "repo-a" — should reduce to 1 card
@@ -164,7 +173,7 @@ def test_search_filters_repos(page, server_url):
     search.fill("repo-a")
     time.sleep(0.2)  # allow debounce/render
 
-    visible = page.locator(".repo-card").count()
+    visible = page.locator(".card").count()
     assert visible == 1, f"Expected 1 card after search, got {visible}"
 
 
@@ -193,7 +202,7 @@ def test_language_toggle(page, server_url):
     en_btn.click()
     assert en_btn.evaluate("el => el.classList.contains('on')")
     # Title should be in English after switch
-    assert page.locator("h1").text_content() == "Harbor"
+    assert page.locator("header h1").text_content() == "Harbor"
 
 
 def test_theme_toggle_data_attr(page, server_url):
@@ -249,7 +258,9 @@ def test_modal_has_aria_attributes(page, server_url):
     """Modal has proper ARIA dialog attributes."""
     base_url, token = server_url
     page.goto(f"{base_url}/?token={token}")
-    page.wait_for_selector("#modalOverlay", timeout=5000)
+    # The overlay is in the DOM from page load but hidden until shown,
+    # so wait for attachment rather than visibility.
+    page.wait_for_selector("#modalOverlay", state="attached", timeout=5000)
 
     overlay = page.locator("#modalOverlay")
     assert overlay.get_attribute("role") == "dialog"
