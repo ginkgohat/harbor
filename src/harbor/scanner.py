@@ -101,7 +101,9 @@ def scan_roots(roots, min_depth=1, max_depth=5):
     """
     all_repos = {}
     for path, label in roots:
-        for repo in find_repos(path, min_depth=min_depth, max_depth=max_depth, label=label):
+        for repo in find_repos(
+            path, min_depth=min_depth, max_depth=max_depth, label=label
+        ):
             # Key by path so two roots with same-named children don't shadow
             # each other.  When two roots actually contain the same repo
             # (realpath collision), the first root wins — same as before.

@@ -73,13 +73,16 @@ def _pid_start_time(pid: int) -> float | None:
     try:
         if sys.platform == "darwin" or sys.platform.startswith("linux"):
             import subprocess
+
             result = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "lstart=", "-ww"],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if result.returncode == 0 and result.stdout.strip():
                 # Parse the ps output (standard "ctime" format).
                 from datetime import datetime
+
                 return datetime.strptime(
                     result.stdout.strip(), "%a %b %d %H:%M:%S %Y"
                 ).timestamp()
@@ -151,7 +154,7 @@ def cmd_start(serve_args) -> int:
 
     # Redirect stdin from /dev/null, stdout/stderr to log file.
     log_f = open(LOG_FILE, "a")  # noqa: SIM115 — held for the lifetime of the daemon
-    devnull = open(os.devnull)   # noqa: SIM115 — same
+    devnull = open(os.devnull)  # noqa: SIM115 — same
     os.dup2(devnull.fileno(), sys.stdin.fileno())
     os.dup2(log_f.fileno(), sys.stdout.fileno())
     os.dup2(log_f.fileno(), sys.stderr.fileno())
@@ -166,16 +169,19 @@ def cmd_start(serve_args) -> int:
 
     # Register atexit handler to clean up PID file.
     import atexit
+
     atexit.register(_remove_pid)
 
     # Handle SIGTERM gracefully.
     def _handle_sigterm(signum, frame):
         # Raise SystemExit so atexit runs and the server shuts down cleanly.
         raise SystemExit(0)
+
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     # Now run the server (imported lazily to avoid circular imports).
     from .__main__ import _run_server
+
     _run_server(serve_args)
 
     return 0
@@ -200,7 +206,10 @@ def cmd_status() -> int:
     started_str = ""
     if start_time:
         from datetime import datetime
-        started_str = f" since {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}"
+
+        started_str = (
+            f" since {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
 
     print(f"Harbor is running (PID {pid}){started_str}.")
     print(f"  Log:    {LOG_FILE}")

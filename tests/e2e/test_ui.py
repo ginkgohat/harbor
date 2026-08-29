@@ -32,6 +32,7 @@ pytestmark = pytest.mark.e2e
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _free_port() -> int:
     """Find a free TCP port on localhost."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -58,22 +59,30 @@ def server_url(tmp_path):
     (repo_b / "dirty.txt").write_text("hello\n")
     subprocess.run(["git", "add", "."], cwd=str(repo_b), capture_output=True)
     subprocess.run(
-        ["git", "-c", "user.email=test@test", "-c", "user.name=Test",
-         "commit", "-m", "initial"],
-        cwd=str(repo_b), capture_output=True, check=True,
+        [
+            "git",
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=str(repo_b),
+        capture_output=True,
+        check=True,
     )
     (repo_b / "dirty.txt").write_text("hello changed\n")
 
     # Config
     config_path = tmp_path / "config.toml"
-    config_mod.save_config(str(config_path), {
-        "roots": [{"path": str(tmp_path), "label": "test"}],
-    })
+    config_mod.save_config(
+        str(config_path), {"roots": [{"path": str(tmp_path), "label": "test"}]}
+    )
 
     # Scan repos
-    repos = scanner_mod.scan_roots(
-        [(str(tmp_path), "test")], min_depth=1, max_depth=3
-    )
+    repos = scanner_mod.scan_roots([(str(tmp_path), "test")], min_depth=1, max_depth=3)
 
     # Configure server
     static_dir = os.path.join(os.path.dirname(server_mod.__file__), "static")
@@ -111,6 +120,7 @@ def server_url(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 def test_page_loads_with_token(page, server_url):
     """Page loads successfully with the auth token in the URL."""
@@ -193,9 +203,7 @@ def test_theme_toggle_data_attr(page, server_url):
     page.wait_for_selector("#themeBtn", timeout=5000)
 
     # Initially system (no data-theme)
-    initial = page.evaluate(
-        "() => document.documentElement.getAttribute('data-theme')"
-    )
+    initial = page.evaluate("() => document.documentElement.getAttribute('data-theme')")
     assert initial is None  # system mode default
 
     theme_btn = page.locator("#themeBtn")

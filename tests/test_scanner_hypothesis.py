@@ -28,7 +28,10 @@ from harbor.scanner import find_repos, scan_roots
 # (case-insensitive). Exclude them so hypothesis never generates a path
 # that os.makedirs rejects on Windows (e.g. "NUL", "CON", "COM1").
 _WINDOWS_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
@@ -41,16 +44,15 @@ _path_component = st.text(
 ).filter(lambda s: s.upper() not in _WINDOWS_RESERVED)
 
 # Generate a relative path like "a/b/c" (0-4 components deep)
-_relative_path = st.lists(
-    _path_component,
-    min_size=0,
-    max_size=4,
-).map(lambda parts: "/".join(parts))
+_relative_path = st.lists(_path_component, min_size=0, max_size=4).map(
+    lambda parts: "/".join(parts)
+)
 
 
 # ---------------------------------------------------------------------------
 # Helper: create a .git directory (real repo)
 # ---------------------------------------------------------------------------
+
 
 def _make_repo(root, rel_path):
     """Create a git repo at *root* / *rel_path* (with a real .git dir)."""
@@ -81,11 +83,16 @@ def _make_plain_dir(root, rel_path):
 # Property: all returned paths are inside the scanned root
 # ---------------------------------------------------------------------------
 
+
 @given(
     repo_paths=st.lists(_relative_path, min_size=0, max_size=20, unique=True),
     plain_paths=st.lists(_relative_path, min_size=0, max_size=10, unique=True),
 )
-@settings(max_examples=80, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=80,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_repo_paths_are_inside_root(tmp_path, repo_paths, plain_paths):
     """Every repo returned by find_repos has a path under the scanned root."""
     root = str(tmp_path / "scan_root")
@@ -110,8 +117,13 @@ def test_repo_paths_are_inside_root(tmp_path, repo_paths, plain_paths):
 # Property: returned repo paths are unique (no duplicates)
 # ---------------------------------------------------------------------------
 
+
 @given(repo_paths=st.lists(_relative_path, min_size=0, max_size=20, unique=True))
-@settings(max_examples=80, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=80,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_repo_paths_are_unique(tmp_path, repo_paths):
     """find_repos never returns the same repo twice."""
     root = str(tmp_path / "scan_root")
@@ -130,8 +142,13 @@ def test_repo_paths_are_unique(tmp_path, repo_paths):
 # Property: dangling worktree pointers are NOT detected
 # ---------------------------------------------------------------------------
 
+
 @given(worktree_paths=st.lists(_relative_path, min_size=1, max_size=10, unique=True))
-@settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_broken_worktrees_not_detected(tmp_path, worktree_paths):
     """A .git file pointing to a nonexistent git dir is NOT reported as a repo."""
     root = str(tmp_path / "scan_root")
@@ -148,12 +165,16 @@ def test_broken_worktrees_not_detected(tmp_path, worktree_paths):
 # Property: scan_roots dedupes repos with the same realpath across roots
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(
-    not hasattr(os, "symlink"),
-    reason="symlinks not supported on this platform",
+    not hasattr(os, "symlink"), reason="symlinks not supported on this platform"
 )
 @given(repo_paths=st.lists(_relative_path, min_size=0, max_size=10, unique=True))
-@settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_scan_roots_dedup_overlapping_roots(tmp_path, repo_paths):
     """When two roots share the same repos (realpath equality), each appears once."""
     root_a = str(tmp_path / "root_a")
@@ -168,10 +189,7 @@ def test_scan_roots_dedup_overlapping_roots(tmp_path, repo_paths):
         os.unlink(root_b)
     os.symlink(root_a, root_b)
 
-    repos = scan_roots(
-        [(root_a, "A"), (root_b, "B")],
-        min_depth=0, max_depth=10,
-    )
+    repos = scan_roots([(root_a, "A"), (root_b, "B")], min_depth=0, max_depth=10)
 
     # Each repo should appear exactly once (dedup by realpath)
     realpaths = [os.path.realpath(p) for p in repos]
@@ -184,8 +202,13 @@ def test_scan_roots_dedup_overlapping_roots(tmp_path, repo_paths):
 # Property: repo at depth 0 (root itself) is always found
 # ---------------------------------------------------------------------------
 
+
 @given(extra_repos=st.lists(_relative_path, min_size=0, max_size=5, unique=True))
-@settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_root_level_repo_found(tmp_path, extra_repos):
     """A repo directly at the scanned root (depth 0) is always included."""
     root = str(tmp_path / "scan_root")
@@ -208,8 +231,13 @@ def test_root_level_repo_found(tmp_path, extra_repos):
 # Property: number of found repos <= number of created repos
 # ---------------------------------------------------------------------------
 
+
 @given(repo_paths=st.lists(_relative_path, min_size=0, max_size=20, unique=True))
-@settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_found_repos_leq_created(tmp_path, repo_paths):
     """We never find MORE repos than we created."""
     root = str(tmp_path / "scan_root")

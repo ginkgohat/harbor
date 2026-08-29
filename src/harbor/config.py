@@ -49,8 +49,7 @@ def load_config(path):
         # Auto-migrate from legacy path if the requested path is the default
         if path.resolve() == CONFIG_PATH.resolve() and _LEGACY_CONFIG_PATH.is_file():
             logger.info(
-                "Migrating config from %s to %s",
-                _LEGACY_CONFIG_PATH, CONFIG_PATH,
+                "Migrating config from %s to %s", _LEGACY_CONFIG_PATH, CONFIG_PATH
             )
             migrate_legacy_config()
             return load_config(path)
@@ -113,7 +112,6 @@ def save_config(path, config):
         tomli_w.dump(clean, f)
 
 
-
 def resolve_roots(cli_paths, config):
     """Resolve the list of (path, label) roots from CLI args.
 
@@ -127,7 +125,10 @@ def resolve_roots(cli_paths, config):
     explicitly on the command line or via a shell alias.
     """
     if cli_paths:
-        return [(p, os.path.basename(os.path.realpath(os.path.expanduser(p)))) for p in cli_paths]
+        return [
+            (p, os.path.basename(os.path.realpath(os.path.expanduser(p))))
+            for p in cli_paths
+        ]
 
     return [(os.getcwd(), os.path.basename(os.getcwd()))]
 

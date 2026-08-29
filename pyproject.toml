@@ -84,8 +84,19 @@ ignore = [
     "B008",  # do not perform function calls in argument defaults — common in argparse
 ]
 
+[tool.ruff.format]
+# Ignore "magic trailing commas": a call/collection that fits within line-length
+# is collapsed onto one line even when the author left a trailing comma.  Keeps
+# short argparse/logger calls compact instead of one-argument-per-line.
+skip-magic-trailing-comma = true
+
 [tool.ruff.lint.flake8-unused-arguments]
 ignore-variadic-names = true
+
+[tool.ruff.lint.isort]
+# Required companion to format.skip-magic-trailing-comma above — ruff warns that
+# the two are incompatible when isort keeps splitting on trailing commas.
+split-on-trailing-comma = false
 
 [tool.mypy]
 python_version = "3.12"

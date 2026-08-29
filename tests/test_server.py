@@ -23,8 +23,10 @@ from harbor.state import AppState
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 class _FakeServer:
     """Stand-in for ThreadingHTTPServer to satisfy Handler construction."""
+
     server_address = ("127.0.0.1", 0)
 
 
@@ -38,7 +40,11 @@ def _make_handler(method, path, body=b"", headers=None):
     h.rfile = io.BytesIO(body)
     h.wfile = io.BytesIO()
     merged = dict(headers or {})
-    if body and "Content-Length" not in merged and "content-length" not in {k.lower() for k in merged}:
+    if (
+        body
+        and "Content-Length" not in merged
+        and "content-length" not in {k.lower() for k in merged}
+    ):
         # _read_json_body() reads Content-Length to size the body read; without
         # it, every POST looks like an empty body.
         merged["Content-Length"] = str(len(body))
@@ -95,6 +101,7 @@ def _fresh_app_state():
 # do_POST 400 on bad JSON  (Group A wiring check)
 # ---------------------------------------------------------------------------
 
+
 def test_post_bad_json_returns_400(tmp_path):
     server.app_state.config_path = str(tmp_path / "config.toml")
     h = _make_handler("POST", "/api/rescan", body=b"{not json")
@@ -108,6 +115,7 @@ def test_post_bad_json_returns_400(tmp_path):
 # ---------------------------------------------------------------------------
 # do_POST /api/rescan returns the documented shape
 # ---------------------------------------------------------------------------
+
 
 def test_post_rescan_returns_shape(tmp_path):
     config_path = str(tmp_path / "config.toml")
@@ -134,11 +142,12 @@ def test_post_rescan_returns_shape(tmp_path):
 # do_POST /api/roots 409 on duplicate path
 # ---------------------------------------------------------------------------
 
+
 def test_post_roots_duplicate_returns_409(tmp_path):
     config_path = tmp_path / "config.toml"
-    config_mod.save_config(str(config_path), {
-        "roots": [{"path": str(tmp_path), "label": "X"}],
-    })
+    config_mod.save_config(
+        str(config_path), {"roots": [{"path": str(tmp_path), "label": "X"}]}
+    )
     server.app_state.config_path = str(config_path)
     # Memory is the source of truth — seed it so the duplicate check hits.
     server.app_state.roots = [(str(tmp_path), "X")]
@@ -180,15 +189,19 @@ def test_post_roots_adds_new_path(tmp_path):
 # do_DELETE /api/roots/<path> removes by path  (B-3)
 # ---------------------------------------------------------------------------
 
+
 def test_delete_root_by_path(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"
-    config_mod.save_config(str(tmp_path / "config.toml"), {
-        "roots": [
-            {"path": str(a), "label": "Alpha"},
-            {"path": str(b), "label": "Beta"},
-        ],
-    })
+    config_mod.save_config(
+        str(tmp_path / "config.toml"),
+        {
+            "roots": [
+                {"path": str(a), "label": "Alpha"},
+                {"path": str(b), "label": "Beta"},
+            ]
+        },
+    )
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.roots = [(str(a), "Alpha"), (str(b), "Beta")]
 
@@ -212,12 +225,15 @@ def test_delete_root_by_path_handles_duplicate_labels(tmp_path):
     """Two roots with the same label must be distinguished by path."""
     a = tmp_path / "a"
     b = tmp_path / "b"
-    config_mod.save_config(str(tmp_path / "config.toml"), {
-        "roots": [
-            {"path": str(a), "label": "SameLabel"},
-            {"path": str(b), "label": "SameLabel"},
-        ],
-    })
+    config_mod.save_config(
+        str(tmp_path / "config.toml"),
+        {
+            "roots": [
+                {"path": str(a), "label": "SameLabel"},
+                {"path": str(b), "label": "SameLabel"},
+            ]
+        },
+    )
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.roots = [(str(a), "SameLabel"), (str(b), "SameLabel")]
 
@@ -248,18 +264,15 @@ def test_delete_root_missing_returns_404(tmp_path):
 # Origin/Referer cross-origin POST returns 403  (C-3)
 # ---------------------------------------------------------------------------
 
+
 def test_action_cross_origin_returns_403(tmp_path):
     """A POST with a foreign Origin is rejected before any git op runs."""
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
 
-    headers = {
-        "Origin": "https://evil.example",
-        "Host": "127.0.0.1:8765",
-    }
+    headers = {"Origin": "https://evil.example", "Host": "127.0.0.1:8765"}
     h = _make_handler(
-        "POST", "/api/repo/some-path/action",
-        body=b'{"action":"pull"}', headers=headers,
+        "POST", "/api/repo/some-path/action", body=b'{"action":"pull"}', headers=headers
     )
     h.do_POST()
     status, body = _read_response(h)
@@ -273,10 +286,7 @@ def test_action_no_origin_allows_through(tmp_path):
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}  # unknown path → 404, not 403
 
-    h = _make_handler(
-        "POST", "/api/repo/missing/action",
-        body=b'{"action":"pull"}',
-    )
+    h = _make_handler("POST", "/api/repo/missing/action", body=b'{"action":"pull"}')
     h.do_POST()
     status, _ = _read_response(h)
     # We just want to confirm the origin check did NOT intercept.
@@ -288,13 +298,9 @@ def test_action_same_origin_allows_through(tmp_path):
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}  # unknown path → 404, not 403
 
-    headers = {
-        "Origin": "http://127.0.0.1:8765",
-        "Host": "127.0.0.1:8765",
-    }
+    headers = {"Origin": "http://127.0.0.1:8765", "Host": "127.0.0.1:8765"}
     h = _make_handler(
-        "POST", "/api/repo/missing/action",
-        body=b'{"action":"pull"}', headers=headers,
+        "POST", "/api/repo/missing/action", body=b'{"action":"pull"}', headers=headers
     )
     h.do_POST()
     status, _ = _read_response(h)
@@ -305,22 +311,23 @@ def test_action_same_origin_allows_through(tmp_path):
 # T-010 — origin check centralized in _dispatch: all mutating routes protected
 # ---------------------------------------------------------------------------
 
-@_pytest.mark.parametrize("method,path,body", [
-    ("POST", "/api/repo/x/action", b'{"action":"pull"}'),
-    ("POST", "/api/pull-all", b"{}"),
-    ("POST", "/api/rescan", b"{}"),
-    ("POST", "/api/roots", b'{"path":"/tmp"}'),
-    ("DELETE", "/api/roots/%2Ftmp", b""),
-])
+
+@_pytest.mark.parametrize(
+    "method,path,body",
+    [
+        ("POST", "/api/repo/x/action", b'{"action":"pull"}'),
+        ("POST", "/api/pull-all", b"{}"),
+        ("POST", "/api/rescan", b"{}"),
+        ("POST", "/api/roots", b'{"path":"/tmp"}'),
+        ("DELETE", "/api/roots/%2Ftmp", b""),
+    ],
+)
 def test_mutating_routes_reject_cross_origin(tmp_path, method, path, body):
     """Every POST/DELETE route rejects cross-origin requests — not just one."""
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
 
-    headers = {
-        "Origin": "https://evil.example",
-        "Host": "127.0.0.1:8765",
-    }
+    headers = {"Origin": "https://evil.example", "Host": "127.0.0.1:8765"}
     h = _make_handler(method, path, body=body, headers=headers)
     if method == "POST":
         h.do_POST()
@@ -335,10 +342,7 @@ def test_get_requests_skip_origin_check(tmp_path):
     """GET requests are not subject to origin validation (read-only)."""
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
-    headers = {
-        "Origin": "https://evil.example",
-        "Host": "127.0.0.1:8765",
-    }
+    headers = {"Origin": "https://evil.example", "Host": "127.0.0.1:8765"}
     h = _make_handler("GET", "/api/repos", body=b"", headers=headers)
     h.do_GET()
     status, body = _read_response(h)
@@ -350,6 +354,7 @@ def test_get_requests_skip_origin_check(tmp_path):
 # ---------------------------------------------------------------------------
 # T-011 — local token authentication
 # ---------------------------------------------------------------------------
+
 
 def test_api_without_token_returns_403_when_auth_enabled(tmp_path):
     """When AUTH_TOKEN is set, API calls without a token get 403."""
@@ -466,6 +471,7 @@ def test_sse_stream_requires_token(tmp_path):
 # T-012 — CSP header on all response types
 # ---------------------------------------------------------------------------
 
+
 def _response_headers(handler):
     """Return the response status line + headers as a list of strings."""
     raw = handler.wfile.getvalue()
@@ -514,16 +520,17 @@ def test_json_response_serves_csp_header(tmp_path):
 # T-022 — action response includes fresh post-action status
 # ---------------------------------------------------------------------------
 
+
 def test_action_response_includes_fresh_status(tmp_path):
     """POST action returns the post-action status for per-card refresh."""
     # Import init_repo from test_harbor
     from tests.test_harbor import init_repo
+
     init_repo(tmp_path / "r")
     path = str(tmp_path / "r")
     server.app_state.repos = {path: {"name": "r", "path": path}}
 
-    h = _make_handler("POST", f"/api/repo/{path}/action",
-                      body=b'{"action":"stash"}')
+    h = _make_handler("POST", f"/api/repo/{path}/action", body=b'{"action":"stash"}')
     h.do_POST()
     status, body = _read_response(h)
     assert status == 200
@@ -537,8 +544,7 @@ def test_action_response_includes_fresh_status(tmp_path):
 def test_action_unknown_repo_has_no_status(tmp_path):
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
-    h = _make_handler("POST", "/api/repo/nonexistent/action",
-                      body=b'{"action":"pull"}')
+    h = _make_handler("POST", "/api/repo/nonexistent/action", body=b'{"action":"pull"}')
     h.do_POST()
     status, body = _read_response(h)
     assert status == 404
@@ -548,6 +554,7 @@ def test_action_unknown_repo_has_no_status(tmp_path):
 # ---------------------------------------------------------------------------
 # start_pull_all_job worker always emits {"done": True}  (C-2)
 # ---------------------------------------------------------------------------
+
 
 def test_pull_all_job_emits_done_on_worker_failure():
     """A worker exception must not prevent the {"done": True} event."""
@@ -611,9 +618,11 @@ def _drain_queue(job_id, timeout=2.0):
 # Routing — greedy path regex handles URL-encoded paths with slashes  (B-2)
 # ---------------------------------------------------------------------------
 
+
 def test_repo_route_matches_url_encoded_path(tmp_path):
     """`/api/repo/<path with />/diff` decodes into a single path argument."""
     from urllib.parse import quote
+
     server.app_state.config_path = str(tmp_path / "config.toml")
     # Empty repos → get_diff returns None → handler sends 404
     server.app_state.repos = {}
@@ -633,13 +642,15 @@ def test_delete_root_url_encoded_path(tmp_path):
     """`DELETE /api/roots/<encoded path>` decodes and matches correctly."""
     a = tmp_path / "space dir"  # contains a space
     os.makedirs(a, exist_ok=True)
-    config_mod.save_config(str(tmp_path / "config.toml"), {
-        "roots": [{"path": str(a), "label": "SpaceDir"}],
-    })
+    config_mod.save_config(
+        str(tmp_path / "config.toml"),
+        {"roots": [{"path": str(a), "label": "SpaceDir"}]},
+    )
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.roots = [(str(a), "SpaceDir")]
 
     from urllib.parse import quote
+
     h = _make_handler("DELETE", f"/api/roots/{quote(str(a))}", body=b"")
     h.do_DELETE()
     status, body = _read_response(h)
@@ -650,6 +661,7 @@ def test_delete_root_url_encoded_path(tmp_path):
 # ---------------------------------------------------------------------------
 # CLI roots are NOT persisted to config on startup (intentional)
 # ---------------------------------------------------------------------------
+
 
 def test_cli_roots_not_persisted_to_config(tmp_path, monkeypatch):
     """CLI roots are temporary — they are not written to config automatically.
@@ -667,33 +679,44 @@ def test_cli_roots_not_persisted_to_config(tmp_path, monkeypatch):
     class _NoopServer:
         def __init__(self, *a, **kw):
             pass
+
         def serve_forever(self):
             raise SystemExit(0)
+
         def shutdown(self):
             pass
+
     monkeypatch.setattr("http.server.ThreadingHTTPServer", _NoopServer)
     # Suppress browser-open side effect
     monkeypatch.setattr("harbor.__main__._try_open_browser", lambda url: None)
 
-    monkeypatch.setattr(sys, "argv", [
-        "harbor", "--no-browser", "--config", str(config_path), str(work_dir),
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harbor", "--no-browser", "--config", str(config_path), str(work_dir)],
+    )
 
     with pytest.raises(SystemExit):
         main()
 
     # Config file should NOT have been created/modified just from CLI args.
-    assert not config_path.is_file() or "roots" not in (config_mod.load_config(str(config_path)) or {})
+    assert not config_path.is_file() or "roots" not in (
+        config_mod.load_config(str(config_path)) or {}
+    )
 
 
 # ---------------------------------------------------------------------------
 # T-002 — stale job TTL sweep
 # ---------------------------------------------------------------------------
 
+
 def test_stale_job_swept_when_new_job_starts(monkeypatch):
     """A job older than JOB_TTL_SECONDS is removed when a new job starts."""
     server.JOBS.clear()
-    server.JOBS["old"] = {"queue": queue.Queue(), "created": time.monotonic() - server.JOB_TTL_SECONDS - 10}
+    server.JOBS["old"] = {
+        "queue": queue.Queue(),
+        "created": time.monotonic() - server.JOB_TTL_SECONDS - 10,
+    }
 
     def noop_pull(repo, q):
         q.put({"done": True})
@@ -751,23 +774,27 @@ def test_job_records_created_timestamp(monkeypatch):
 
 class _MockExecutor:
     """Minimal ThreadPoolExecutor stand-in that runs work synchronously."""
+
     def __init__(self, max_workers=1):
         pass
+
     def __enter__(self):
         return self
+
     def __exit__(self, *a):
         pass
+
     def submit(self, fn, *args, **kwargs):
         class _MockFuture:
             def result(self_):
                 return fn(*args, **kwargs)
+
         return _MockFuture()
 
 
 # ---------------------------------------------------------------------------
 # T-050 — SSE stream integration tests (real ThreadingHTTPServer)
 # ---------------------------------------------------------------------------
-
 
 
 def _start_real_server(monkeypatch, tmp_path):
@@ -806,6 +833,7 @@ def _read_sse_events(base_url, job_id, max_events=100, timeout=3):
     no Content-Length and urllib waits for EOF before returning any data.
     """
     from urllib.parse import urlparse
+
     parsed = urlparse(base_url)
     host = parsed.hostname
     port = parsed.port
@@ -833,7 +861,9 @@ def _read_sse_events(base_url, job_id, max_events=100, timeout=3):
         while len(events) < max_events:
             while "\n\n" in buf:
                 block, buf = buf.split("\n\n", 1)
-                data_lines = [ln[6:] for ln in block.split("\n") if ln.startswith("data: ")]
+                data_lines = [
+                    ln[6:] for ln in block.split("\n") if ln.startswith("data: ")
+                ]
                 if data_lines:
                     payload = "\n".join(data_lines)
                     events.append(json.loads(payload))
@@ -907,6 +937,7 @@ def test_sse_client_disconnect_leaves_job_for_sweep(monkeypatch, tmp_path):
         slow_q.put({"repo": "test", "status": "running"})
         # Connect via raw socket, read one event, then close abruptly
         from urllib.parse import urlparse
+
         parsed = urlparse(base_url)
         sock = socket.socket()
         sock.settimeout(2)
@@ -930,7 +961,9 @@ def test_sse_client_disconnect_leaves_job_for_sweep(monkeypatch, tmp_path):
 
         # Simulate TTL expiry — sweep should clean it
         with server.JOBS_LOCK:
-            server.JOBS[slow_job_id]["created"] = time.monotonic() - server.JOB_TTL_SECONDS - 100
+            server.JOBS[slow_job_id]["created"] = (
+                time.monotonic() - server.JOB_TTL_SECONDS - 100
+            )
         server._sweep_stale_jobs()
         assert slow_job_id not in server.JOBS
     finally:

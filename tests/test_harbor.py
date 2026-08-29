@@ -24,21 +24,39 @@ from harbor.server import Handler
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def init_repo(path, branch="main"):
     """Create a git repo at *path* and return it."""
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "-C", str(path), "init", "-b", branch], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@harbor.local"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.name", "Harbor Test"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(path), "init", "-b", branch], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@harbor.local"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.name", "Harbor Test"],
+        check=True,
+        capture_output=True,
+    )
     # Create an initial commit so we have a real branch
     (path / "README.md").write_text("# test")
-    subprocess.run(["git", "-C", str(path), "add", "README.md"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(path), "commit", "-m", "initial"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(path), "add", "README.md"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-m", "initial"],
+        check=True,
+        capture_output=True,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
+
 
 def test_find_repos_empty(tmp_path):
     assert find_repos(str(tmp_path), min_depth=0, max_depth=3) == []
@@ -61,8 +79,8 @@ def test_find_repos_root_itself_is_repo(tmp_path):
 
 
 def test_find_repos_respects_depth(tmp_path):
-    init_repo(tmp_path / "a" / "b")          # depth 2 — should be found
-    init_repo(tmp_path / "x" / "y" / "z")    # depth 3 — should be excluded
+    init_repo(tmp_path / "a" / "b")  # depth 2 — should be found
+    init_repo(tmp_path / "x" / "y" / "z")  # depth 3 — should be excluded
     repos = find_repos(str(tmp_path), min_depth=1, max_depth=2)
     names = [r["name"] for r in repos]
     assert "a/b" in names
@@ -88,6 +106,7 @@ def test_find_repos_default_label(tmp_path):
     init_repo(tmp_path / "foo")
     repos = find_repos(str(tmp_path), min_depth=0, max_depth=3)
     assert repos[0]["root_label"] == os.path.basename(str(tmp_path))
+
 
 def test_find_repos_parent_directory(tmp_path):
     """Pointing at a repo's parent directory (depth 1) should find it."""
@@ -128,8 +147,8 @@ def test_find_repos_stops_at_repo(tmp_path):
 
 def test_find_repos_nested_repos_at_different_levels(tmp_path):
     """Repos at various depths under the root should all be found."""
-    init_repo(tmp_path / "a")          # depth 1
-    init_repo(tmp_path / "b" / "c")    # depth 2
+    init_repo(tmp_path / "a")  # depth 1
+    init_repo(tmp_path / "b" / "c")  # depth 2
     init_repo(tmp_path / "d" / "e" / "f")  # depth 3
     repos = find_repos(str(tmp_path))
     names = [r["name"] for r in repos]
@@ -142,6 +161,7 @@ def test_find_repos_nested_repos_at_different_levels(tmp_path):
 # ---------------------------------------------------------------------------
 # T-001 / T-080 — worktree .git file detection + broken pointer skipping
 # ---------------------------------------------------------------------------
+
 
 def test_find_repos_worktree(tmp_path):
     """A repo where .git is a file (worktree / submodule) is discovered."""
@@ -202,13 +222,14 @@ def test_find_repos_malformed_git_file_skipped(tmp_path):
     assert "malformed" not in names
 
 
-
 def test_scan_roots_multiple(tmp_path):
     d1 = tmp_path / "work"
     d2 = tmp_path / "personal"
     init_repo(d1 / "project-a")
     init_repo(d2 / "project-b")
-    repos = scan_roots([(str(d1), "Work"), (str(d2), "Personal")], min_depth=1, max_depth=2)
+    repos = scan_roots(
+        [(str(d1), "Work"), (str(d2), "Personal")], min_depth=1, max_depth=2
+    )
     assert len(repos) == 2
     # scan_roots now keys by repo path, not name — so two roots with
     # same-named children both appear.
@@ -242,6 +263,7 @@ def test_scan_roots_dedup(tmp_path):
 # T-021 — scan_roots caches default_branch on each repo record
 # ---------------------------------------------------------------------------
 
+
 def test_scan_roots_caches_default_branch(tmp_path):
     d = tmp_path / "work"
     init_repo(d / "project-a")
@@ -254,11 +276,7 @@ def test_scan_roots_caches_default_branch(tmp_path):
 
 def test_repo_status_uses_cached_default_branch(tmp_path):
     init_repo(tmp_path / "r")
-    repo = {
-        "name": "r",
-        "path": str(tmp_path / "r"),
-        "default_branch": "main",
-    }
+    repo = {"name": "r", "path": str(tmp_path / "r"), "default_branch": "main"}
     status = repo_status(repo)
     assert status["is_main"] is True
     # Cached value is used even if it's non-standard
@@ -279,6 +297,7 @@ def test_repo_status_cached_default_branch_miss(tmp_path):
 # ---------------------------------------------------------------------------
 # T-020 — parse_porcelain_v2 parser unit tests
 # ---------------------------------------------------------------------------
+
 
 def test_parse_porcelain_v2_normal_branch_with_upstream():
     text = (
@@ -329,9 +348,7 @@ def test_parse_porcelain_v2_no_upstream():
 def test_parse_porcelain_v2_dirty_variants():
     """Dirty tracks 1, 2, and u entries; ? (untracked) does NOT make dirty."""
     text = (
-        "1 .M N... 100644 100644 100644 a b tracked.py\n"
-        "? untracked.py\n"
-        "! ignored.py\n"
+        "1 .M N... 100644 100644 100644 a b tracked.py\n? untracked.py\n! ignored.py\n"
     )
     r = parse_porcelain_v2(text)
     assert r["dirty"] is True
@@ -344,6 +361,7 @@ def test_repo_status_parity_with_legacy(tmp_path):
     """New porcelain=v2 implementation should match legacy semantics for
     the key fields (branch, dirty, detached, is_main)."""
     import subprocess
+
     init_repo(tmp_path / "r")
     repo = {"name": "r", "path": str(tmp_path / "r")}
 
@@ -362,7 +380,8 @@ def test_repo_status_parity_with_legacy(tmp_path):
     # Detach HEAD
     subprocess.run(
         ["git", "-C", str(tmp_path / "r"), "checkout", "--detach"],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     status = repo_status(repo)
     assert status["detached"] is True
@@ -372,6 +391,7 @@ def test_repo_status_parity_with_legacy(tmp_path):
 # ---------------------------------------------------------------------------
 # Git operations
 # ---------------------------------------------------------------------------
+
 
 def test_repo_status_clean(tmp_path):
     init_repo(tmp_path / "clean")
@@ -432,7 +452,11 @@ def test_do_action_pull_no_upstream(tmp_path):
     outcome = do_action(path, "pull", repos)
     # Pull skipped or failed — no upstream configured.
     assert outcome.status in ("ok", "skipped")
-    assert "upstream" in outcome.output.lower() or "no remote" in outcome.output.lower() or not outcome.ok
+    assert (
+        "upstream" in outcome.output.lower()
+        or "no remote" in outcome.output.lower()
+        or not outcome.ok
+    )
 
 
 def test_do_action_stash(tmp_path):
@@ -460,7 +484,11 @@ def test_do_action_discard(tmp_path):
 def test_do_action_checkout_main(tmp_path):
     init_repo(tmp_path / "r")
     # Create a feature branch
-    subprocess.run(["git", "-C", str(tmp_path / "r"), "checkout", "-b", "feature"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path / "r"), "checkout", "-b", "feature"],
+        check=True,
+        capture_output=True,
+    )
     path = str(tmp_path / "r")
     repos = {path: {"name": "r", "path": path}}
     outcome = do_action(path, "checkout-main", repos)
@@ -482,6 +510,7 @@ def test_run_git_disables_interactive_prompts():
     """T-013: every git subprocess runs with GIT_TERMINAL_PROMPT=0."""
     import subprocess
     from unittest.mock import patch
+
     with tempfile.TemporaryDirectory() as d:
         init_repo(Path(d))
         with patch("subprocess.run") as mock_run:
@@ -501,6 +530,7 @@ def test_run_git_disables_interactive_prompts():
 # T-041 — diff truncation
 # ---------------------------------------------------------------------------
 
+
 def _make_repo_with_big_diff(tmp_path):
     init_repo(tmp_path / "r")
     # Write a big file so the diff exceeds the cap
@@ -516,6 +546,7 @@ def test_get_diff_small_not_truncated(tmp_path):
     (tmp_path / "r" / "README.md").write_text("modified content\n")
     repos = {str(tmp_path / "r"): {"name": "r", "path": str(tmp_path / "r")}}
     from harbor.git import get_diff
+
     result = get_diff(str(tmp_path / "r"), repos)
     assert result is not None
     assert result["truncated"] is False
@@ -524,6 +555,7 @@ def test_get_diff_small_not_truncated(tmp_path):
 
 def test_get_diff_truncates_large_diff(tmp_path):
     from harbor.git import get_diff
+
     init_repo(tmp_path / "r")
     # Modify tracked README to be huge (exceeds 512KB)
     big_line = "x" * 100 + "\n"
@@ -538,6 +570,7 @@ def test_get_diff_truncates_large_diff(tmp_path):
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
 
 def test_save_load_round_trip(tmp_path):
     """tomli_w produces valid TOML that tomllib can read back unchanged."""
@@ -568,10 +601,7 @@ def test_save_load_round_trip(tmp_path):
 def test_save_and_load_config(tmp_path):
     config_path = tmp_path / "config.toml"
     config = {
-        "roots": [
-            {"path": "~/work", "label": "Work"},
-            {"path": "~/personal"},
-        ],
+        "roots": [{"path": "~/work", "label": "Work"}, {"path": "~/personal"}],
         "port": 9999,
         "min_depth": 1,
     }
@@ -593,7 +623,7 @@ def test_migrate_legacy_config(tmp_path, monkeypatch):
     legacy_dir = tmp_path / "legacy" / "harbor"
     legacy_dir.mkdir(parents=True)
     legacy_path = legacy_dir / "config.toml"
-    legacy_path.write_text('port = 4242\nmin_depth = 2\n')
+    legacy_path.write_text("port = 4242\nmin_depth = 2\n")
 
     new_dir = tmp_path / "new" / "harbor"
     new_path = new_dir / "config.toml"
@@ -633,12 +663,7 @@ def test_migrate_legacy_noop_when_no_legacy(tmp_path, monkeypatch):
 
 def test_resolve_roots_no_args_uses_cwd():
     """No CLI args, even with a populated config → current directory."""
-    config = {
-        "roots": [
-            {"path": "/a", "label": "A"},
-            {"path": "/b", "label": "B"},
-        ]
-    }
+    config = {"roots": [{"path": "/a", "label": "A"}, {"path": "/b", "label": "B"}]}
     roots = resolve_roots([], config)
     assert len(roots) == 1
     assert roots[0][0] == os.getcwd()
@@ -713,8 +738,10 @@ def test_create_server_success():
 # T-030 — AppState dataclass
 # ---------------------------------------------------------------------------
 
+
 def test_app_state_defaults():
     from harbor.state import AppState
+
     state = AppState()
     assert state.repos == {}
     assert state.config_path == ""
@@ -727,6 +754,7 @@ def test_app_state_defaults():
 def test_app_state_is_independent():
     """Two AppState instances don't share mutable defaults."""
     from harbor.state import AppState
+
     a = AppState()
     b = AppState()
     a.repos["/x"] = {"name": "x"}
@@ -737,16 +765,20 @@ def test_app_state_is_independent():
 # T-031 — Repo dataclass + safe_pull_check
 # ---------------------------------------------------------------------------
 
+
 def test_repo_dataclass_as_dict(tmp_path):
     from harbor.git import Repo
+
     repo = Repo(name="myrepo", path=str(tmp_path), root_label="work")
     d = repo.as_dict()
     assert d["name"] == "myrepo"
     assert d["path"] == str(tmp_path)
     assert d["root_label"] == "work"
 
+
 def test_repo_status_accepts_dataclass(tmp_path):
     from harbor.git import Repo, repo_status
+
     init_repo(tmp_path / "r")
     repo = Repo(name="r", path=str(tmp_path / "r"), root_label="test")
     status = repo_status(repo)
@@ -757,6 +789,7 @@ def test_repo_status_accepts_dataclass(tmp_path):
 
 def test_safe_pull_check_clean_repo(tmp_path):
     from harbor.git import safe_pull_check
+
     init_repo(tmp_path / "r")
     can, reason = safe_pull_check(str(tmp_path / "r"))
     assert can is True
@@ -765,6 +798,7 @@ def test_safe_pull_check_clean_repo(tmp_path):
 
 def test_safe_pull_check_dirty_repo(tmp_path):
     from harbor.git import safe_pull_check
+
     init_repo(tmp_path / "r")
     # Modify a tracked file (init_repo creates README.md)
     (tmp_path / "r" / "README.md").write_text("modified\n")
@@ -775,10 +809,12 @@ def test_safe_pull_check_dirty_repo(tmp_path):
 
 def test_safe_pull_check_detached(tmp_path):
     from harbor.git import safe_pull_check
+
     init_repo(tmp_path / "r")
     subprocess.run(
         ["git", "-C", str(tmp_path / "r"), "checkout", "--detach", "HEAD"],
-        capture_output=True, check=True,
+        capture_output=True,
+        check=True,
     )
     can, reason = safe_pull_check(str(tmp_path / "r"))
     assert can is False
@@ -787,10 +823,12 @@ def test_safe_pull_check_detached(tmp_path):
 
 def test_do_action_returns_action_outcome(tmp_path):
     from harbor.git import ActionOutcome
+
     outcome = do_action("nonexistent", "pull", {})
     assert isinstance(outcome, ActionOutcome)
     assert outcome.status == "not_found"
     assert outcome.ok is False
+
 
 def test_do_action_outcome_as_dict(tmp_path):
     init_repo(tmp_path / "r")
