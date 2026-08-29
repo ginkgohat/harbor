@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Repo dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Repo:
     """A single git repository discovered by the scanner.
@@ -60,6 +61,7 @@ class ActionOutcome:
     def as_dict(self) -> dict:
         return {"ok": self.ok, "output": self.output}
 
+
 # Default per-command timeout for status/diff/ref queries.  Generous enough
 # for large repos, but prevents one hung git process (dead network mount,
 # iCloud placeholder file, credential prompt, index.lock contention) from
@@ -93,7 +95,9 @@ def run_git(path, *args, timeout=GIT_TIMEOUT):
     """
     cmd = ["git", "-C", path, *args]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=_git_env())
+        p = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, env=_git_env()
+        )
     except subprocess.TimeoutExpired:
         logger.warning("git command timed out after %ss: %s", timeout, " ".join(cmd))
         return None, "", f"timed out after {timeout}s"
@@ -121,7 +125,7 @@ def parse_porcelain_v2(text):
 
     for line in text.splitlines():
         if line.startswith("# branch.head "):
-            head = line[len("# branch.head "):]
+            head = line[len("# branch.head ") :]
             if head == "(detached)":
                 detached = True
             else:
@@ -133,7 +137,13 @@ def parse_porcelain_v2(text):
         elif line[:2] in ("1 ", "2 ", "u "):
             dirty = True
 
-    return {"branch": branch, "detached": detached, "ahead": ahead, "behind": behind, "dirty": dirty}
+    return {
+        "branch": branch,
+        "detached": detached,
+        "ahead": ahead,
+        "behind": behind,
+        "dirty": dirty,
+    }
 
 
 def repo_status(repo):
@@ -151,13 +161,21 @@ def repo_status(repo):
     path = _repo_path(repo)
     name = _repo_name(repo)
     root_label = repo.root_label if isinstance(repo, Repo) else repo.get("root_label")
-    default_branch = repo.default_branch if isinstance(repo, Repo) else repo.get("default_branch")
+    default_branch = (
+        repo.default_branch if isinstance(repo, Repo) else repo.get("default_branch")
+    )
 
     rc, out, _ = run_git(path, "status", "--porcelain=v2", "--branch")
     if rc == 0:
         parsed = parse_porcelain_v2(out)
     else:
-        parsed = {"branch": "", "detached": True, "ahead": None, "behind": None, "dirty": True}
+        parsed = {
+            "branch": "",
+            "detached": True,
+            "ahead": None,
+            "behind": None,
+            "dirty": True,
+        }
 
     branch = parsed["branch"]
     # T-021: scan_roots caches the probe result on the repo record; fall back
@@ -241,7 +259,13 @@ def pull_one(repo, q):
 
     rc, out, err = run_git(path, "pull", "--ff-only", timeout=PULL_TIMEOUT)
     if rc == 0:
-        q.put({"repo": name, "status": "success", "message": (out.strip() or "already up to date")})
+        q.put(
+            {
+                "repo": name,
+                "status": "success",
+                "message": (out.strip() or "already up to date"),
+            }
+        )
     else:
         q.put({"repo": name, "status": "failed", "message": (out + err).strip()})
 
@@ -290,7 +314,9 @@ def do_action(path: str, action: str, repos) -> ActionOutcome:
     if action == "pull":
         can_pull, reason = safe_pull_check(repo_path)
         if not can_pull:
-            return ActionOutcome(ok=False, output=f"skipped: {reason}", status="skipped")
+            return ActionOutcome(
+                ok=False, output=f"skipped: {reason}", status="skipped"
+            )
         rc, out, err = run_git(repo_path, "pull", "--ff-only", timeout=PULL_TIMEOUT)
     elif action == "stash":
         rc, out, err = run_git(repo_path, "stash", "push", "-u", "-m", "harbor")
@@ -301,7 +327,9 @@ def do_action(path: str, action: str, repos) -> ActionOutcome:
     elif action == "checkout-main":
         target = _default_branch(repo_path)
         if not target:
-            return ActionOutcome(ok=False, output="no default branch found", status="skipped")
+            return ActionOutcome(
+                ok=False, output="no default branch found", status="skipped"
+            )
         rc, out, err = run_git(repo_path, "checkout", target)
     elif action == "open-vscode":
         code_bin = shutil.which("code")
@@ -311,10 +339,14 @@ def do_action(path: str, action: str, repos) -> ActionOutcome:
                 output="VS Code 'code' command not found. Run 'Shell Command: Install code command in PATH' from VS Code first.",
                 status="skipped",
             )
-        subprocess.Popen([code_bin, repo_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            [code_bin, repo_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
         return ActionOutcome(ok=True, output=f"code {repo_path}", status="ok")
     else:
-        return ActionOutcome(ok=False, output=f"unknown action: {action}", status="bad_request")
+        return ActionOutcome(
+            ok=False, output=f"unknown action: {action}", status="bad_request"
+        )
 
     return ActionOutcome(ok=(rc == 0), output=(out + err).strip(), status="ok")
 

@@ -11,7 +11,9 @@ language-neutral labels, not translatable UI copy.
 import re
 from pathlib import Path
 
-INDEX_HTML = Path(__file__).resolve().parent.parent / "src" / "harbor" / "static" / "index.html"
+INDEX_HTML = (
+    Path(__file__).resolve().parent.parent / "src" / "harbor" / "static" / "index.html"
+)
 
 CJK_RE = re.compile(r"[⺀-鿿豈-﫿　-〿＀-￯]")
 
@@ -40,8 +42,9 @@ def test_no_cjk_outside_str_table():
         for lineno, line in enumerate(remainder.splitlines(), 1)
         if CJK_RE.search(line) and "data-lang" not in line
     ]
-    assert not hits, "hardcoded CJK outside the STR table (move it into STR.zh/en):\n" + "\n".join(
-        f"  L{lineno}: {line[:100]}" for lineno, line in hits
+    assert not hits, (
+        "hardcoded CJK outside the STR table (move it into STR.zh/en):\n"
+        + "\n".join(f"  L{lineno}: {line[:100]}" for lineno, line in hits)
     )
 
 
@@ -56,4 +59,6 @@ def test_str_tables_have_identical_keys():
         return set(re.findall(r"^ {4}(\w+):", m.group(1), re.MULTILINE))
 
     zh, en = keys("zh"), keys("en")
-    assert zh == en, f"STR key mismatch — zh-only: {sorted(zh - en)}, en-only: {sorted(en - zh)}"
+    assert zh == en, (
+        f"STR key mismatch — zh-only: {sorted(zh - en)}, en-only: {sorted(en - zh)}"
+    )

@@ -47,7 +47,9 @@ def _create_server(port: int) -> http.server.ThreadingHTTPServer:
                 "  → Try a different port with:  harbor --port <number>\n"
                 "  → Or find and stop the process using port %d:\n"
                 "       lsof -i :%d",
-                port, port, port,
+                port,
+                port,
+                port,
             )
             sys.exit(1)
         raise
@@ -63,11 +65,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="harbor",
         description="Harbor — local web dashboard for managing multiple git repos.",
     )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"harbor {__version__}",
-    )
+    parser.add_argument("--version", action="version", version=f"harbor {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
@@ -82,7 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="*",
         metavar="ROOT",
         help="One or more directories to scan for git repos. "
-             "If omitted, scans the current directory.",
+        "If omitted, scans the current directory.",
     )
     serve.add_argument(
         "--config",
@@ -258,8 +256,12 @@ def _run_server(args) -> int:
 
     # --- Resolve settings ---------------------------------------------
     port = config_mod.resolve_setting(args.port, "HARBOR_PORT", "port", config, 8765)
-    min_depth = config_mod.resolve_setting(args.min_depth, "HARBOR_MIN_DEPTH", "min_depth", config, 1)
-    max_depth = config_mod.resolve_setting(args.max_depth, "HARBOR_MAX_DEPTH", "max_depth", config, 5)
+    min_depth = config_mod.resolve_setting(
+        args.min_depth, "HARBOR_MIN_DEPTH", "min_depth", config, 1
+    )
+    max_depth = config_mod.resolve_setting(
+        args.max_depth, "HARBOR_MAX_DEPTH", "max_depth", config, 5
+    )
 
     # --- Resolve roots ------------------------------------------------
     roots = config_mod.resolve_roots(args.roots, config)
@@ -304,6 +306,7 @@ def _run_server(args) -> int:
     # written by daemon.py — overwriting with the same value is fine.
     try:
         from . import daemon as _daemon_mod
+
         _daemon_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
         # PID file (0644 — harmless, just a number)
         _daemon_mod.PID_FILE.write_text(str(os.getpid()))
@@ -311,9 +314,7 @@ def _run_server(args) -> int:
         _daemon_mod.PORT_FILE.write_text(str(port))
         # Token file (0600 — sensitive)
         fd = os.open(
-            str(_daemon_mod.TOKEN_FILE),
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-            0o600,
+            str(_daemon_mod.TOKEN_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
         )
         with os.fdopen(fd, "w") as f:
             f.write(token + "\n")
@@ -328,8 +329,10 @@ def _run_server(args) -> int:
     # even when killed from outside (e.g. `kill <pid>` or `harbor stop`).
     # On Windows, SIGTERM isn't available — skip silently.
     if hasattr(signal, "SIGTERM"):
+
         def _handle_sigterm(signum, frame):
             raise SystemExit(0)
+
         signal.signal(signal.SIGTERM, _handle_sigterm)
 
     httpd = _create_server(port)

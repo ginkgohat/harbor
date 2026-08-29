@@ -152,7 +152,9 @@ def _post_pull_all(self, m, parsed, body):
 @_route("POST", r"^/api/roots$")
 def _post_roots(self, m, parsed, body):
     path = (body.get("path") or "").strip()
-    label = (body.get("label") or "").strip() or os.path.basename(os.path.expanduser(path))
+    label = (body.get("label") or "").strip() or os.path.basename(
+        os.path.expanduser(path)
+    )
     if not path:
         self._send_json(400, {"ok": False, "error": "path is required"})
         return
@@ -175,13 +177,16 @@ def _post_roots(self, m, parsed, body):
 @_route("POST", r"^/api/rescan$")
 def _post_rescan(self, m, parsed, body):
     roots, repos = self._rescan()
-    self._send_json(200, {
-        "ok": True,
-        "roots": [{"path": p, "label": label} for p, label in roots],
-        "count": len(repos),
-        "min_depth": app_state.min_depth,
-        "max_depth": app_state.max_depth,
-    })
+    self._send_json(
+        200,
+        {
+            "ok": True,
+            "roots": [{"path": p, "label": label} for p, label in roots],
+            "count": len(repos),
+            "min_depth": app_state.min_depth,
+            "max_depth": app_state.max_depth,
+        },
+    )
 
 
 @_route("POST", r"^/api/repo/(?P<path>.+)/action$")
@@ -226,14 +231,10 @@ def _delete_root(self, m, parsed, body):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _outcome_http_code(outcome) -> int:
     """Translate an :class:`ActionOutcome` status into an HTTP status code."""
-    mapping = {
-        "ok": 200,
-        "skipped": 200,
-        "not_found": 404,
-        "bad_request": 400,
-    }
+    mapping = {"ok": 200, "skipped": 200, "not_found": 404, "bad_request": 400}
     return mapping.get(outcome.status, 200)
 
 
@@ -256,7 +257,11 @@ def _sweep_stale_jobs():
     """Drop jobs older than JOB_TTL_SECONDS.  Returns how many were swept."""
     now = time.monotonic()
     with JOBS_LOCK:
-        stale = [jid for jid, job in JOBS.items() if now - job.get("created", now) > JOB_TTL_SECONDS]
+        stale = [
+            jid
+            for jid, job in JOBS.items()
+            if now - job.get("created", now) > JOB_TTL_SECONDS
+        ]
         for jid in stale:
             JOBS.pop(jid, None)
     if stale:
@@ -432,7 +437,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if app_state.cli_max_depth is None:
             app_state.max_depth = config.get("max_depth", app_state.max_depth)
         new_repos = scanner_mod.scan_roots(
-            app_state.roots, min_depth=app_state.min_depth, max_depth=app_state.max_depth,
+            app_state.roots,
+            min_depth=app_state.min_depth,
+            max_depth=app_state.max_depth,
         )
         app_state.repos = new_repos
         return app_state.roots, new_repos
@@ -474,7 +481,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not token:
             auth_header = self.headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
-                token = auth_header[len("Bearer "):]
+                token = auth_header[len("Bearer ") :]
         if token != AUTH_TOKEN:
             self._send_json(403, {"ok": False, "error": "invalid or missing token"})
             return False
@@ -525,5 +532,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # BaseHTTPRequestHandler formats "GET /path?token=xxx HTTP/1.1" 200 -
         # Strip the query string to avoid leaking tokens to logs.
         import re as _re
+
         cleaned = _re.sub(r"( \S+?)\?\S+? ", r"\1 ", msg, count=1)
         logger.debug("%s - %s", self.address_string(), cleaned)

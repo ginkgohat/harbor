@@ -12,6 +12,7 @@ from harbor import daemon, selfmanage
 # selfmanage tests
 # ---------------------------------------------------------------------------
 
+
 class TestRunPip:
     def test_returns_zero_on_success(self):
         with patch("subprocess.call", return_value=0) as mock_call:
@@ -66,8 +67,10 @@ class TestCmdSelfUpdate:
             assert "editable (dev) mode" in captured.err
 
     def test_git_install_runs_pip_upgrade(self, capsys):
-        with patch.object(selfmanage, "_detect_install_kind", return_value="git+https"), \
-             patch.object(selfmanage, "_run_pip", return_value=0) as mock_run:
+        with (
+            patch.object(selfmanage, "_detect_install_kind", return_value="git+https"),
+            patch.object(selfmanage, "_run_pip", return_value=0) as mock_run,
+        ):
             rc = selfmanage.cmd_self_update()
             assert rc == 0
             mock_run.assert_called_once()
@@ -79,8 +82,10 @@ class TestCmdSelfUpdate:
             assert "updated" in captured.out
 
     def test_update_failure_returns_one(self, capsys):
-        with patch.object(selfmanage, "_detect_install_kind", return_value="git+https"), \
-             patch.object(selfmanage, "_run_pip", return_value=1):
+        with (
+            patch.object(selfmanage, "_detect_install_kind", return_value="git+https"),
+            patch.object(selfmanage, "_run_pip", return_value=1),
+        ):
             rc = selfmanage.cmd_self_update()
             assert rc == 1
             captured = capsys.readouterr()
@@ -112,6 +117,7 @@ class TestCmdSelfUninstall:
 # ---------------------------------------------------------------------------
 # daemon tests
 # ---------------------------------------------------------------------------
+
 
 class TestPIDHelpers:
     def test_read_pid_no_file(self, tmp_path, monkeypatch):
@@ -235,9 +241,7 @@ class TestCmdStart:
             captured = capsys.readouterr()
             assert "not supported" in captured.err
 
-    @pytest.mark.skipif(
-        not hasattr(os, "fork"), reason="requires fork (Unix-only)",
-    )
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork (Unix-only)")
     def test_already_running_returns_zero(self, capsys, tmp_path, monkeypatch):
         pid_file = tmp_path / "harbor.pid"
         pid_file.write_text(str(os.getpid()))
@@ -253,9 +257,11 @@ class TestCmdStart:
 # CLI / argparse tests (top-level and subcommand dispatch)
 # ---------------------------------------------------------------------------
 
+
 class TestCLI:
     def test_help_lists_subcommands(self):
         from harbor.__main__ import _build_parser
+
         parser = _build_parser()
         choices = list(parser._subparsers._group_actions[0].choices.keys())
         for name in ["serve", "update", "uninstall", "start", "status", "stop"]:

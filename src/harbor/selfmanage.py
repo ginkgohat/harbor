@@ -106,7 +106,9 @@ def cmd_self_update() -> int:
     if rc == 0:
         print()
         print("✓ Harbor has been updated.")
-        print("  If Harbor is currently running, restart it for changes to take effect.")
+        print(
+            "  If Harbor is currently running, restart it for changes to take effect."
+        )
     else:
         print()
         print("✗ Update failed. See pip output above.", file=sys.stderr)
