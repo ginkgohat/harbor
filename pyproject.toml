@@ -35,7 +35,7 @@ dev = [
     "pytest-timeout",
     "ruff",
     "pytest-cov",
-    "build>=1",
+    "build>=1.6.0",
     "twine",
     "mypy",
     "pre-commit",
