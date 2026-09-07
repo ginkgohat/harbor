@@ -9,7 +9,7 @@ Harbor is a local web dashboard for managing multiple git repositories at once.
 
 - **Language**: Python (stdlib only at runtime) + vanilla JS/CSS/HTML frontend
 - **Package layout**: `src/harbor/` (setuptools `package-dir: src`)
-- **Python target**: 3.10+ (`requires-python = ">=3.10,<3.14"`)
+- **Python target**: 3.10+ (`requires-python = ">=3.10,<3.15"`)
 - **Build**: setuptools + setuptools-scm (version from git tags)
 - **Zero runtime dependencies** — only stdlib plus `tomli` on <3.11 and `tomli-w`/`platformdirs`
 - **Frontend**: single HTML file + one utility JS file. No frameworks, no build step.
@@ -63,7 +63,7 @@ PYTHONPATH=src python3 -m pytest tests/test_server.py::test_origin_check -v
 
 ### Python
 
-- **Target 3.10 compatibility** — `requires-python = ">=3.10,<3.14"` and ruff's
+- **Target 3.10 compatibility** — `requires-python = ">=3.10,<3.15"` and ruff's
   `target-version = "py310"`. 3.10 features (`match`/`case`, `X | None`) are fine
   and already used; 3.11+ ones are not.
 - Line length: 88 chars (soft limit; `ruff` doesn't enforce E501 but stay close).
@@ -129,7 +129,7 @@ Read these before touching server.py or git.py:
 
 - Adding new runtime dependencies. Harbor's "zero deps" (near-zero) identity is a feature.
 - Adding a frontend framework or build step. The single-file frontend is intentional.
-- Breaking Python 3.10 compatibility (`requires-python = ">=3.10,<3.14"` in `pyproject.toml`).
+- Breaking Python 3.10 compatibility (`requires-python = ">=3.10,<3.15"` in `pyproject.toml`).
 - Making network calls from Harbor (it's a local tool).
 - Adding a database. State lives in memory + the TOML config file.
 - Platform-specific code without guards for Linux/macOS/Windows.
