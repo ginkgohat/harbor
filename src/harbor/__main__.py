@@ -80,7 +80,8 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="*",
         metavar="ROOT",
         help="One or more directories to scan for git repos. "
-        "If omitted, scans the current directory.",
+        "If omitted, uses roots saved in the config file (e.g. added "
+        "via the UI), or falls back to the current directory.",
     )
     serve.add_argument(
         "--config",

@@ -116,18 +116,30 @@ def resolve_roots(cli_paths, config):
     """Resolve the list of (path, label) roots from CLI args.
 
     - If CLI paths are given, use them.
+    - Otherwise, use the roots saved in the config file (e.g. added
+      through the UI), if any.
     - Otherwise, use the current working directory.
 
-    Rationale: ``harbor`` with no arguments should scan the current
-    directory — this matches user intuition (like ``ls`` or ``code .``)
-    and the README documentation.  Config-file roots are no longer
-    consulted by default; users who want persistent roots can pass them
-    explicitly on the command line or via a shell alias.
+    Rationale: ``harbor`` with no arguments and no saved roots should
+    scan the current directory — this matches user intuition (like
+    ``ls`` or ``code .``) and the README documentation. But once a user
+    has explicitly added roots through the UI, those should persist
+    across restarts instead of being silently dropped.
     """
     if cli_paths:
         return [
             (p, os.path.basename(os.path.realpath(os.path.expanduser(p))))
             for p in cli_paths
+        ]
+
+    if config and config.get("roots"):
+        return [
+            (
+                root["path"],
+                root.get("label")
+                or os.path.basename(os.path.realpath(os.path.expanduser(root["path"]))),
+            )
+            for root in config["roots"]
         ]
 
     return [(os.getcwd(), os.path.basename(os.getcwd()))]
