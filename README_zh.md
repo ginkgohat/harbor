@@ -6,7 +6,7 @@
 
 一个本地 Web 面板，用于同时管理多个 Git 仓库。
 
-**零依赖** —— Python 标准库 + 单个 HTML 文件。不需要 Node.js、不需要 pip 包、不需要 Docker。
+**近零依赖** —— 纯 Python 后端 + 自包含浏览器前端。不需要 Node.js、不需要 Docker、没有构建步骤。仅有的三个运行时 pip 包都是小巧且按条件引入的辅助库：`tomli`（仅 Python < 3.11）、`tomli-w` 和 `platformdirs`。
 
 <p align="center">
   <img src="docs/img/screenshot.png" alt="Harbor 截图" width="720">
@@ -22,7 +22,7 @@
 
 Harbor 就是为这而生的。它是个小面板，**一眼看完所有仓库的状态**——干净、有改动、ahead、behind——还能批量 pull、stash、切换分支。不用再在十几个目录之间 cd 来 cd 去才能开始一天的工作。
 
-它也刻意保持简单：一个 Python 文件 + 一个 HTML 文件。没有构建步骤、没有数据库、没有 Docker。两秒钟装好，然后就忘了它的存在。
+它也刻意保持简单：一个 Python 包 + 一个自包含的 HTML 前端。没有构建步骤、没有数据库、没有 Docker。两秒钟装好，然后就忘了它的存在。
 
 ## 功能
 

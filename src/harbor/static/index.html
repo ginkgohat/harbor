@@ -835,19 +835,19 @@ const STR = {
     tagDirty: "改动未提交", tagDetached: "detached",
     tagBehind: (n) => `落后 ${n}`,
     tagAhead: (n) => `领先 ${n}`,
-    btnPull: "Pull", btnStash: "Stash", btnDiscard: "丢弃", btnMain: "main", btnPreview: "预览", btnVscode: "VSCode",
+    btnPull: "Pull", btnStash: "Stash", btnDiscard: "丢弃", btnMain: "默认分支", btnPreview: "预览", btnVscode: "VSCode",
     refreshTip: "刷新配置",
     refreshDone: (n) => `已刷新 · ${n} 个 repo`,
     batchStash: (n) => `Stash 全部 (${n})`,
     batchDiscard: (n) => `丢弃全部 (${n})`,
-    batchMain: (n) => `切换全部到 main (${n})`,
+    batchMain: (n) => `切换全部到默认分支 (${n})`,
     statLine: (total, dirty, nonMain) => `<b>${total}</b> repos · <b>${dirty}</b> 未提交 · <b>${nonMain}</b> 非 main`,
     confirmDiscardTitle: "丢弃改动",
-    confirmDiscardBody: (name) => `将在 "${name}" 中永久丢弃所有未提交改动和未追踪文件，此操作不可撤销。`,
-    confirmMainTitle: "切换到 main",
-    confirmMainBody: (name) => `将把 "${name}" 切换到 main / master 分支。`,
+    confirmDiscardBody: (name) => `将在 "${name}" 把所有未提交改动和未追踪文件放入 git stash（可恢复），可随时用 "git stash apply" 找回。`,
+    confirmMainTitle: "切换到默认分支",
+    confirmMainBody: (name) => `将把 "${name}" 切换到其默认分支。`,
     confirmBatchDiscardTitle: "丢弃全部改动",
-    confirmBatchDiscardBody: (n, names) => `将在 ${n} 个 repo（${names}）中永久丢弃所有未提交改动，此操作不可撤销。`,
+    confirmBatchDiscardBody: (n, names) => `将在 ${n} 个 repo（${names}）把所有未提交改动放入 git stash（可恢复）。`,
     confirmBtn: "确认执行", cancelBtn: "取消",
     termTitle: "终端日志", termClear: "清空",
     diffLoading: "加载中…", diffLoadingBody: "加载改动中…", diffLoadFail: "无法加载改动",
@@ -871,6 +871,7 @@ const STR = {
     noRoots: "还没有配置目录 —— 在下方添加",
     noSubdirs: "没有子目录",
     addBtn: "添加", removeTip: "移除",
+    themeSystem: "主题：跟随系统", themeLight: "主题：浅色", themeDark: "主题：深色",
   },
   en: {
     searchPh: "Filter repos…",
@@ -882,19 +883,19 @@ const STR = {
     tagDirty: "uncommitted", tagDetached: "detached",
     tagBehind: (n) => `${n} behind`,
     tagAhead: (n) => `${n} ahead`,
-    btnPull: "Pull", btnStash: "Stash", btnDiscard: "Discard", btnMain: "main", btnPreview: "Preview", btnVscode: "VSCode",
+    btnPull: "Pull", btnStash: "Stash", btnDiscard: "Discard", btnMain: "default", btnPreview: "Preview", btnVscode: "VSCode",
     refreshTip: "Refresh config",
     refreshDone: (n) => `Refreshed · ${n} repos`,
     batchStash: (n) => `Stash all (${n})`,
     batchDiscard: (n) => `Discard all (${n})`,
-    batchMain: (n) => `Switch all to main (${n})`,
+    batchMain: (n) => `Switch all to default branch (${n})`,
     statLine: (total, dirty, nonMain) => `<b>${total}</b> repos · <b>${dirty}</b> uncommitted · <b>${nonMain}</b> non-main`,
     confirmDiscardTitle: "Discard changes",
-    confirmDiscardBody: (name) => `This will permanently discard all uncommitted changes and untracked files in "${name}". This cannot be undone.`,
-    confirmMainTitle: "Switch to main",
-    confirmMainBody: (name) => `This will check out main / master in "${name}".`,
+    confirmDiscardBody: (name) => `This will stash all uncommitted changes and untracked files in "${name}" (recoverable). You can restore them anytime with "git stash apply".`,
+    confirmMainTitle: "Switch to default branch",
+    confirmMainBody: (name) => `This will check out the default branch in "${name}".`,
     confirmBatchDiscardTitle: "Discard all changes",
-    confirmBatchDiscardBody: (n, names) => `This will permanently discard uncommitted changes in ${n} repos (${names}). This cannot be undone.`,
+    confirmBatchDiscardBody: (n, names) => `This will stash uncommitted changes in ${n} repos (${names}) (recoverable).`,
     confirmBtn: "Confirm", cancelBtn: "Cancel",
     termTitle: "Terminal log", termClear: "Clear",
     diffLoading: "Loading…", diffLoadingBody: "Loading changes…", diffLoadFail: "Failed to load changes",
@@ -918,10 +919,12 @@ const STR = {
     noRoots: "No roots configured yet — add one below.",
     noSubdirs: "No subdirectories",
     addBtn: "Add", removeTip: "Remove",
+    themeSystem: "Theme: system", themeLight: "Theme: light", themeDark: "Theme: dark",
   },
 };
 
-let lang = localStorage.getItem("harborLang") || "zh";
+let lang = localStorage.getItem("harborLang")
+  || (navigator.language && navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en");
 function t(key, ...args) {
   const v = STR[lang][key];
   return typeof v === "function" ? v(...args) : v;
@@ -937,17 +940,9 @@ const cssId = (name) => "r-" + encodeURIComponent(name);
 const escHTML = (s) => s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const escAttr = (s) => s.replace(/[&"]/g, c => (c === "&" ? "&amp;" : "&quot;"));
 
-// T-011 — auth token read from the URL query string.
-// The server requires ?token= on every API request to prevent CSRF,
-// DNS rebinding, and local process attacks.
-const _urlParams = new URLSearchParams(window.location.search);
-let AUTH_TOKEN = _urlParams.get("token");
-
-function _withToken(url) {
-  if (!AUTH_TOKEN) return url;
-  const sep = url.includes("?") ? "&" : "?";
-  return url + sep + "token=" + encodeURIComponent(AUTH_TOKEN);
-}
+// Auth is via an HttpOnly, SameSite=Strict session cookie set by the server
+// after the one-time launch-token exchange on /.  Browsers send that cookie
+// same-origin automatically, so no token needs to appear in any URL.
 
 // --- Auth gate ---
 function showAuthError(msg) {
@@ -997,11 +992,11 @@ function _setupAuthForm() {
       });
       const data = await res.json();
       if (data.ok) {
-        // Update global state & URL, then dismiss the gate
-        AUTH_TOKEN = token;
+        // Server set the session cookie; drop any stale token from the URL
+        // and reload — the cookie rides along on every subsequent request.
         clearAuthError();
         const url = new URL(window.location);
-        url.searchParams.set("token", token);
+        url.searchParams.delete("token");
         window.history.replaceState({}, "", url.toString());
         hideAuthGate();
         loadRepos();
@@ -1073,9 +1068,7 @@ function cycleTheme() {
   localStorage.setItem("harborTheme", theme);
   applyTheme(theme);
   const btn = $("#themeBtn");
-  if (theme === "system") btn.title = "Theme: system";  // simplified
-  else if (theme === "light") btn.title = "Theme: light";
-  else btn.title = "Theme: dark";
+  btn.title = t("theme" + theme[0].toUpperCase() + theme.slice(1));  // themeSystem/themeLight/themeDark
 }
 
 $("#themeBtn").addEventListener("click", cycleTheme);
@@ -1166,7 +1159,7 @@ $("#refreshBtn").addEventListener("click", async () => {
   btn.disabled = true;
   btn.style.opacity = "0.5";
   try {
-    const res = await fetch(_withToken("/api/rescan"), { method: "POST", signal: AbortSignal.timeout(30000) });
+    const res = await fetch(`/api/rescan`, { method: "POST", signal: AbortSignal.timeout(30000) });
     const data = await res.json();
     if (data.ok) {
       await loadRepos();
@@ -1212,17 +1205,14 @@ document.addEventListener("visibilitychange", () => {
 
 async function loadRepos() {
   try {
-    const res = await fetch(_withToken("/api/repos"), { signal: AbortSignal.timeout(15000) });
-    // Auth failures (401/403) mean the token is missing or wrong — show the
-    // token gate instead of treating it as a connection error.  Only add the
-    // "invalid token" hint when we actually had a (wrong) token in the URL.
+    const res = await fetch(`/api/repos`, { signal: AbortSignal.timeout(15000) });
+    // Auth failures (401/403) mean the session cookie is missing or wrong —
+    // show the token gate so the user can enter the launch token to log in.
     if (res.status === 401 || res.status === 403) {
-      const hadToken = !!AUTH_TOKEN;
-      AUTH_TOKEN = null;
       const url = new URL(window.location);
       url.searchParams.delete("token");
       window.history.replaceState({}, "", url.toString());
-      showAuthGate(hadToken ? t("badToken") : null);
+      showAuthGate();
       return;
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1247,7 +1237,7 @@ async function loadRepos() {
 
 function render() {
   const q = filterText.trim().toLowerCase();
-  const visible = repos.filter(r => !q || r.name.toLowerCase().includes(q));
+  const visible = repos.filter(r => !q || [r.name, r.path, r.root_label || "", r.branch || ""].some(v => v.toLowerCase().includes(q)));
   const attention = visible.filter(needsAttention);
   const synced = visible.filter(r => !needsAttention(r));
 
@@ -1347,7 +1337,7 @@ function renderBatchActions(attention) {
     $("#batchDiscard")?.addEventListener("click", () => {
       askConfirm(t("confirmBatchDiscardTitle"),
         t("confirmBatchDiscardBody", dirty.length, dirty.map(r=>r.name).join(", ")),
-        "git checkout -- . && git clean -fd",
+        "git stash push -u",
         () => bulkRun("discard", dirty));
     });
   }
@@ -1450,13 +1440,13 @@ $("#pullAllBtn").addEventListener("click", async () => {
 
   document.querySelectorAll(".card").forEach(c => c.dataset.state = "idle");
 
-  const res = await fetch(_withToken("/api/pull-all"), { method: "POST" });
+  const res = await fetch(`/api/pull-all`, { method: "POST" });
   const { job_id } = await res.json();
   pullJobActive = true;
   const total = repos.length;
   let done = 0;
 
-  const es = new EventSource(_withToken(`/api/stream?job=${job_id}`));
+  const es = new EventSource(`/api/stream?job=${job_id}`, { withCredentials: true });
   let retries = 0;
   es.onmessage = (ev) => {
     retries = 0;
@@ -1547,9 +1537,9 @@ document.addEventListener("click", async (e) => {
   if (act === "pull") { await singlePull(name, path, actBtn); }
   else if (act === "stash") { await runAction(name, path, "stash"); }
   else if (act === "discard") {
-    askConfirm(t("confirmDiscardTitle"), t("confirmDiscardBody", name), "git checkout -- . && git clean -fd", () => runAction(name, path, "discard"));
+    askConfirm(t("confirmDiscardTitle"), t("confirmDiscardBody", name), "git stash push -u", () => runAction(name, path, "discard"));
   } else if (act === "checkout-main") {
-    askConfirm(t("confirmMainTitle"), t("confirmMainBody", name), "git checkout main", () => runAction(name, path, "checkout-main"));
+    askConfirm(t("confirmMainTitle"), t("confirmMainBody", name), "git checkout <default-branch>", () => runAction(name, path, "checkout-main"));
   } else if (act === "preview") {
     await openDiff(name, path);
   } else if (act === "vscode") {
@@ -1581,7 +1571,7 @@ async function openDiff(name, path) {
   $("#diffBody").innerHTML = `<div class="d-empty">${t("diffLoadingBody")}</div>`;
   $("#diffOverlay").classList.add("show");
 
-  const res = await fetch(_withToken(`/api/repo/${encodeURIComponent(path)}/diff`));
+  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/diff`);
   if (!res.ok) {
     $("#diffBody").innerHTML = `<div class="d-empty">${t("diffLoadFail")}</div>`;
     $("#diffSub").textContent = "";
@@ -1618,7 +1608,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#diffOv
 
 async function runAction(name, path, action) {
   termLine(`<span class="r">$</span> ${escHTML(name)}: ${action}`);
-  const res = await fetch(_withToken(`/api/repo/${encodeURIComponent(path)}/action`), {
+  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/action`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action }),
   });
@@ -1631,15 +1621,26 @@ async function runAction(name, path, action) {
 async function bulkRun(action, repoList) {
   $("#terminal").classList.add("open");
   document.body.classList.add("term-open");
-  // Each item carries both name (for the terminal) and path (for the URL).
-  await Promise.all(repoList.map(r => runAction(r.name, r.path, action)));
+  const total = repoList.length;
+  const CONCURRENCY = 4;
+  termLine(`<span class="r">$</span> batch ${action} — ${total} repo(s), concurrency ${CONCURRENCY}`);
+  let i = 0, done = 0;
+  async function worker() {
+    while (i < total) {
+      const r = repoList[i++];
+      await runAction(r.name, r.path, action);
+      done++;
+      termLine(`<span class="d">·</span> ${done}/${total} done`);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
 }
 
 async function singlePull(name, path, btn) {
   btn.disabled = true;
   setCardStatus(name, "running");
   termLine(`<span class="r">$</span> git -C ${escHTML(name)} pull --ff-only`);
-  const res = await fetch(_withToken(`/api/repo/${encodeURIComponent(path)}/action`), {
+  const res = await fetch(`/api/repo/${encodeURIComponent(path)}/action`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "pull" }),
   });
@@ -1670,7 +1671,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 async function renderSettingsRoots() {
-  const res = await fetch(_withToken("/api/roots"));
+  const res = await fetch(`/api/roots`);
   const roots = await res.json();
   $("#settingsRoots").innerHTML = roots.length ? roots.map(r => `
     <div class="root-item">
@@ -1688,7 +1689,7 @@ $("#settingsRoots").addEventListener("click", async (e) => {
   const btn = e.target.closest(".del-btn");
   if (!btn) return;
   // Match by path (B-3) — the contract is symmetric with POST /api/roots.
-  await fetch(_withToken(`/api/roots/${encodeURIComponent(btn.dataset.path)}`), { method: "DELETE" });
+  await fetch(`/api/roots/${encodeURIComponent(btn.dataset.path)}`, { method: "DELETE" });
   await renderSettingsRoots();
   await loadRepos();
 });
@@ -1702,7 +1703,7 @@ $("#browseQuick").addEventListener("click", (e) => {
 });
 
 async function loadBrowse(path) {
-  const res = await fetch(_withToken(`/api/browse?path=${encodeURIComponent(path)}`));
+  const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
   const data = await res.json();
   browsePath = data.path;
   renderBrowsePath(data);
@@ -1751,7 +1752,7 @@ $("#browseList").addEventListener("click", async (e) => {
 });
 
 async function addRoot(path, label) {
-  const res = await fetch(_withToken("/api/roots"), {
+  const res = await fetch(`/api/roots`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, label }),
   });
@@ -1764,11 +1765,9 @@ async function addRoot(path, label) {
 /* ---------- init ---------- */
 renderStatic();
 _setupAuthForm();
-if (!AUTH_TOKEN) {
-  showAuthGate();
-} else {
-  loadRepos();
-}
+// Session-cookie auth: root always serves the page; if `/api/repos` returns
+// 401/403 (no valid cookie), `loadRepos` shows the token gate.
+loadRepos();
 </script>
 </body>
 </html>

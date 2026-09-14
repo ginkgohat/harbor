@@ -120,3 +120,33 @@ jobs:
           status=$?
           echo "make coverage exited with status=$status"
           exit $status
+
+  # E2E browser tests — one Linux + one Python version is enough.  They
+  # exercise real browser behavior (login, batch actions, discard) rather than
+  # Python-version/OS portability, which the `test` matrix already covers.
+  e2e:
+    name: E2E (browser)
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          make dev PYTHON=python
+
+      # Install Chromium plus the OS libraries it needs on the GitHub runner
+      # (`make e2e-setup` installs the browser binary but not the apt system
+      # deps that `--with-deps` sets up).
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run e2e tests
+        run: make test-e2e PYTHON=python

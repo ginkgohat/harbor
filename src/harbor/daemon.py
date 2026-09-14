@@ -25,6 +25,9 @@ PID_FILE = STATE_DIR / "harbor.pid"
 LOG_FILE = STATE_DIR / "harbor.log"
 TOKEN_FILE = STATE_DIR / "harbor.token"
 PORT_FILE = STATE_DIR / "harbor.port"
+# Persisted HMAC key used to sign web-session cookies (0600).  Surviving a
+# restart means a browser's login cookie stays valid across server restarts.
+SESSION_SECRET_FILE = STATE_DIR / "harbor.credentials"
 
 
 def _read_pid() -> int | None:

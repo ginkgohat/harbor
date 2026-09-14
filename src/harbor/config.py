@@ -56,6 +56,10 @@ def load_config(path):
         return None
     except tomllib.TOMLDecodeError:
         return None
+    except OSError:
+        # Unreadable file (permissions, I/O error) — degrade to "no config"
+        # rather than crashing, so a broken config never blocks startup.
+        return None
 
 
 def migrate_legacy_config():
@@ -154,3 +158,24 @@ def resolve_setting(cli_val, env_var, config_key, config, default):
     if config and config_key in config:
         return config[config_key]
     return default
+
+
+def resolve_int_setting(cli_val, env_var, config_key, config, default, lo, hi, name):
+    """Resolve an integer setting and validate it against ``[lo, hi]``.
+
+    Like :func:`resolve_setting`, but also converts the env-string to ``int``
+    safely and checks the final value fits the range.  Raises ``ValueError``
+    with a human-readable message on a non-numeric env value or an out-of-range
+    result — the caller turns that into a friendly startup error instead of a
+    raw ``ValueError`` traceback (e.g. ``HARBOR_PORT=abc``).
+    """
+    value = resolve_setting(cli_val, env_var, config_key, config, default)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} must be an integer, got {value!r} (from {env_var or config_key})"
+        ) from None
+    if not lo <= value <= hi:
+        raise ValueError(f"{name} must be between {lo} and {hi}, got {value}")
+    return value

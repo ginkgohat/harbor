@@ -6,7 +6,7 @@
 
 A local web dashboard for managing multiple git repositories at once.
 
-**Zero dependencies** — Python standard library + a single HTML file. No Node.js, no pip packages, no Docker.
+**Near-zero dependencies** — a pure-Python backend + a self-contained browser UI. No Node.js, no Docker, no build step. The only runtime pip packages are three tiny, optional-conditioned helpers: `tomli` (Python < 3.11 only), `tomli-w`, and `platformdirs`.
 
 <p align="center">
   <img src="docs/img/screenshot.png" alt="Harbor Screenshot" width="720">
@@ -22,7 +22,7 @@ You know the feeling: you've got 20+ git repositories scattered across your lapt
 
 Harbor was built for that. It's a little dashboard that shows **all your repos at a glance** — clean, dirty, ahead, behind — and lets you pull, stash, and switch branches in bulk. No more cd-ing around 15 directories before you can start your day.
 
-It's also intentionally simple: one Python file + one HTML file. No build step, no database, no Docker. You install it in 2 seconds and forget about it.
+It's also intentionally simple: one Python package + a self-contained HTML frontend. No build step, no database, no Docker. You install it in 2 seconds and forget about it.
 
 ## Features
 
