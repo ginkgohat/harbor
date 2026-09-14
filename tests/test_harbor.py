@@ -3,6 +3,7 @@
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -308,9 +309,14 @@ def test_default_branch_cache_reprobes_after_ttl(tmp_path):
     ) as probe:
         scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
         first_calls = probe.call_count
-        # Age every cached entry past the TTL, then re-scan.
+        # Age every cached entry past the TTL, then re-scan.  Entries are
+        # timestamped with time.monotonic(), whose zero point is arbitrary
+        # (e.g. time since boot) — not epoch time — so backdate relative to
+        # the TTL instead of hardcoding 0.0, which some CI runners have not
+        # been "up" long enough to still register as expired.
+        expired_at = time.monotonic() - scanner_mod._DEFAULT_BRANCH_TTL - 1
         for key in list(scanner_mod._DEFAULT_BRANCH_CACHE):
-            scanner_mod._DEFAULT_BRANCH_CACHE[key] = (0.0, "main")
+            scanner_mod._DEFAULT_BRANCH_CACHE[key] = (expired_at, "main")
         scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
         assert probe.call_count > first_calls
 
