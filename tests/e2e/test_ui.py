@@ -91,6 +91,7 @@ def server_url(tmp_path):
     html_path = os.path.join(static_dir, "index.html")
     saved_state = server_mod.app_state
     saved_token = server_mod.AUTH_TOKEN
+    saved_secret = server_mod.SESSION_SECRET
     server_mod.app_state = AppState(
         repos=repos,
         roots=[(str(tmp_path), "test")],
@@ -101,6 +102,8 @@ def server_url(tmp_path):
         max_depth=3,
     )
     server_mod.AUTH_TOKEN = "test-token-123"
+    # Signing key for the session cookie (as __main__.py would set it).
+    server_mod.SESSION_SECRET = b"e2e-session-secret-16-bytes!!"
 
     port = _free_port()
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), server_mod.Handler)
@@ -124,6 +127,7 @@ def server_url(tmp_path):
     httpd.shutdown()
     server_mod.app_state = saved_state
     server_mod.AUTH_TOKEN = saved_token
+    server_mod.SESSION_SECRET = saved_secret
 
 
 # ---------------------------------------------------------------------------

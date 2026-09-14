@@ -478,7 +478,16 @@ def test_do_action_discard(tmp_path):
     repos = {path: {"name": "r", "path": path}}
     outcome = do_action(path, "discard", repos)
     assert outcome.ok is True
+    # Stash-based discard removes the file from the working tree but keeps it
+    # recoverable on the stash list (--include-untracked via ``-u``).
     assert not (tmp_path / "r" / "junk.txt").exists()
+    stash_list = subprocess.run(
+        ["git", "-C", str(tmp_path / "r"), "stash", "list"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "harbor:discard" in stash_list
 
 
 def test_do_action_checkout_main(tmp_path):
@@ -567,6 +576,21 @@ def test_get_diff_truncates_large_diff(tmp_path):
     assert len(result["diff"].encode("utf-8")) <= 512 * 1024
 
 
+def test_get_diff_untracked_handles_spaces_and_quotes(tmp_path):
+    """Untracked filenames with spaces / quotes must come back raw, not C-quoted."""
+    from harbor.git import get_diff
+
+    init_repo(tmp_path / "r")
+    (tmp_path / "r" / "two words.txt").write_text("x\n")
+    (tmp_path / "r" / "weird%@#.txt").write_text("y\n")
+    repos = {str(tmp_path / "r"): {"name": "r", "path": str(tmp_path / "r")}}
+    result = get_diff(str(tmp_path / "r"), repos)
+    assert result is not None
+    untracked = set(result["untracked"])
+    assert "two words.txt" in untracked
+    assert "weird%@#.txt" in untracked
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -596,6 +620,47 @@ def test_save_load_round_trip(tmp_path):
     assert loaded["roots"][0]["label"] == "Work"
     assert loaded["roots"][2]["path"] == 'C:\\Users\\test "quotes"'
     assert loaded["roots"][2]["label"] == 'say "hi"'
+
+
+def test_load_config_degrades_on_oserror(tmp_path, monkeypatch):
+    """An unreadable config file (e.g. permissions) must not crash startup."""
+    import builtins
+
+    from harbor import config as config_mod
+
+    target = tmp_path / "config.toml"
+
+    def _raising_open(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(builtins, "open", _raising_open)
+    assert config_mod.load_config(str(target)) is None
+
+
+def test_resolve_int_setting_validates(monkeypatch):
+    """resolve_int_setting rejects non-numeric / out-of-range inputs cleanly."""
+    from harbor.config import resolve_int_setting
+
+    # Non-numeric env value -> clear ValueError, not a raw traceback.
+    monkeypatch.setenv("HARBOR_PORT", "abc")
+    with pytest.raises(ValueError):
+        resolve_int_setting(None, "HARBOR_PORT", "port", {}, 8765, 1, 65535, "port")
+    # Out of valid port range.
+    monkeypatch.setenv("HARBOR_PORT", "99999")
+    with pytest.raises(ValueError):
+        resolve_int_setting(None, "HARBOR_PORT", "port", {}, 8765, 1, 65535, "port")
+    # Valid env value.
+    monkeypatch.setenv("HARBOR_PORT", "8080")
+    assert (
+        resolve_int_setting(None, "HARBOR_PORT", "port", {}, 8765, 1, 65535, "port")
+        == 8080
+    )
+    # CLI value wins over a bad / ignored env string.
+    monkeypatch.setenv("HARBOR_PORT", "abc")
+    assert (
+        resolve_int_setting(7000, "HARBOR_PORT", "port", {}, 8765, 1, 65535, "port")
+        == 7000
+    )
 
 
 def test_save_and_load_config(tmp_path):

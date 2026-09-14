@@ -92,9 +92,12 @@ def _fresh_app_state():
     """
     server.app_state = AppState()
     saved_token = server.AUTH_TOKEN
+    saved_secret = server.SESSION_SECRET
     server.AUTH_TOKEN = None
+    server.SESSION_SECRET = None
     yield
     server.AUTH_TOKEN = saved_token
+    server.SESSION_SECRET = saved_secret
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +113,50 @@ def test_post_bad_json_returns_400(tmp_path):
     assert status == 400
     assert body["ok"] is False
     assert "invalid" in body["error"].lower()
+
+
+def test_post_oversized_body_returns_413(tmp_path):
+    """A body larger than MAX_BODY_BYTES is rejected before being read into memory."""
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+    # Small bytes, but advertise an oversized Content-Length (as a malicious or
+    # runaway client would) — do_POST must bail with 413 before reading body.
+    h = _make_handler(
+        "POST",
+        "/api/rescan",
+        body=b"{}",
+        headers={"Content-Length": str(server.MAX_BODY_BYTES * 2)},
+    )
+    h.do_POST()
+    status, body = _read_response(h)
+    assert status == 413
+    assert "large" in body["error"]
+
+
+def test_is_loopback_host():
+    from harbor.server import _is_loopback_host
+
+    assert _is_loopback_host("127.0.0.1:8765")
+    assert _is_loopback_host("localhost")
+    assert _is_loopback_host("[::1]:8765")
+    assert not _is_loopback_host("evil.example:8765")
+    assert not _is_loopback_host("192.168.1.5:8765")
+
+
+def test_mutating_request_rejects_non_loopback_host(tmp_path):
+    """A DNS-rebinding style POST (attacker Host + matching Origin) is blocked."""
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+
+    headers = {"Origin": "http://evil.example:8765", "Host": "evil.example:8765"}
+    h = _make_handler(
+        "POST", "/api/repo/x/action", body=b'{"action":"pull"}', headers=headers
+    )
+    h.do_POST()
+    status, body = _read_response(h)
+    assert status == 403
+    assert "loopback" in body["error"].lower()
+
 
 
 # ---------------------------------------------------------------------------
@@ -352,13 +399,28 @@ def test_get_requests_skip_origin_check(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# T-011 — local token authentication
+# T-011 — local session-cookie authentication
+#
+# The launch token AUTH_TOKEN is only exchanged for a signed session cookie on
+# ``/`` (or ``/login``).  API/SSE requests must present that cookie; the launch
+# token itself is never accepted.
 # ---------------------------------------------------------------------------
 
 
-def test_api_without_token_returns_403_when_auth_enabled(tmp_path):
-    """When AUTH_TOKEN is set, API calls without a token get 403."""
-    server.AUTH_TOKEN = "secret123"
+def _enable_auth():
+    """Turn on session auth and return a fresh valid cookie for 127.0.0.1:8765."""
+    server.AUTH_TOKEN = "launch-123"
+    server.SESSION_SECRET = b"test-secret-16-bytes!!"
+    return server._new_session_cookie("127.0.0.1:8765")
+
+
+def _cookie_headers(cookie_value, host="127.0.0.1:8765"):
+    return {"Cookie": f"{server.SESSION_COOKIE}={cookie_value}", "Host": host}
+
+
+def test_api_without_cookie_returns_403_when_auth_enabled(tmp_path):
+    """API calls without a valid session cookie get 403."""
+    _enable_auth()
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
 
@@ -367,37 +429,64 @@ def test_api_without_token_returns_403_when_auth_enabled(tmp_path):
     status, body = _read_response(h)
     assert status == 403
     assert body["ok"] is False
-    assert "token" in body["error"].lower()
+    assert "session" in body["error"].lower()
 
 
-def test_api_with_correct_token_returns_200(tmp_path):
-    """When AUTH_TOKEN is set and the query has the right token, request proceeds."""
-    server.AUTH_TOKEN = "secret123"
+def test_api_with_valid_cookie_returns_200(tmp_path):
+    """API calls with a valid signed session cookie proceed."""
+    cookie = _enable_auth()
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
 
-    h = _make_handler("GET", "/api/repos?token=secret123", body=b"")
+    h = _make_handler("GET", "/api/repos", body=b"", headers=_cookie_headers(cookie))
     h.do_GET()
     status, body = _read_response(h)
     assert status == 200
     assert isinstance(body, list)
 
 
-def test_api_with_wrong_token_returns_403(tmp_path):
-    """Wrong token value is rejected."""
-    server.AUTH_TOKEN = "secret123"
+def test_api_with_tampered_cookie_returns_403(tmp_path):
+    """A cookie whose signature no longer matches is rejected."""
+    cookie = _enable_auth()
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
+    last = "0" if cookie[-1] != "0" else "1"
+    tampered = cookie[:-1] + last
 
-    h = _make_handler("GET", "/api/repos?token=wrong", body=b"")
+    h = _make_handler("GET", "/api/repos", body=b"", headers=_cookie_headers(tampered))
     h.do_GET()
     status, _ = _read_response(h)
     assert status == 403
 
 
-def test_static_and_root_exempt_from_token_auth(tmp_path):
-    """Static assets and the root page don't require a token."""
-    server.AUTH_TOKEN = "secret123"
+def test_api_with_cookie_for_other_port_returns_403(tmp_path):
+    """A cookie bound to a different port must not authenticate here."""
+    _enable_auth()
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+    other = server._new_session_cookie("127.0.0.1:9999")
+
+    h = _make_handler("GET", "/api/repos", body=b"", headers=_cookie_headers(other))
+    h.do_GET()
+    status, _ = _read_response(h)
+    assert status == 403
+
+
+def test_launch_token_never_accepted_by_api(tmp_path):
+    """The launch token in the URL is NOT a valid API credential."""
+    _enable_auth()
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {}
+
+    h = _make_handler("GET", "/api/repos?token=launch-123", body=b"")
+    h.do_GET()
+    status, _ = _read_response(h)
+    assert status == 403
+
+
+def test_static_and_root_exempt_from_auth(tmp_path):
+    """Static assets, the root page, and favicon don't require auth."""
+    _enable_auth()
     # Root page
     h = _make_handler("GET", "/", body=b"")
     h.do_GET()
@@ -416,36 +505,80 @@ def test_static_and_root_exempt_from_token_auth(tmp_path):
     assert status3 != 403
 
 
-def test_post_action_with_token(tmp_path):
-    """POST requests also accept token via query string."""
-    server.AUTH_TOKEN = "secret123"
+def test_root_redeems_launch_token_for_cookie_and_redirects(tmp_path):
+    """``/?token=<launch>`` issues a signed cookie and 302-redirects to clean ``/``."""
+    _enable_auth()
+    h = _make_handler(
+        "GET", "/?token=launch-123", body=b"", headers={"Host": "127.0.0.1:8765"}
+    )
+    h.do_GET()
+    status_line, set_cookie = _read_response_head(h)
+    assert "302" in status_line
+    lines = set_cookie.lower()
+    assert "location: /" in lines
+    assert "set-cookie: harbor_session=" in lines
+    assert "httponly" in lines
+    assert "samesite=strict" in lines
+    assert "path=/" in lines
+
+
+def test_root_with_launch_token_for_other_host_redirects_elsewhere(tmp_path):
+    """A wrong launch token does NOT issue a cookie (serves the page instead)."""
+    _enable_auth()
+    h = _make_handler("GET", "/?token=wrong", body=b"")
+    h.do_GET()
+    status, _ = _read_response(h)
+    raw = h.wfile.getvalue()
+    head = raw.split(b"\r\n\r\n", 1)[0].decode("latin1").lower()
+    assert "set-cookie: harbor_session=" not in head
+    assert status != 403  # root still serves the page
+
+
+def test_post_login_issues_cookie(tmp_path):
+    """POST /login with a valid launch token issues a cookie and redirects to ``/``."""
+    _enable_auth()
+    h = _make_handler(
+        "POST",
+        "/login",
+        body=json.dumps({"token": "launch-123"}).encode(),
+        headers={"Host": "127.0.0.1:8765", "Content-Type": "application/json"},
+    )
+    h.do_POST()
+    status, body = _read_response(h)
+    assert status == 200
+    assert body["ok"] is True
+    assert body["redirect"] == "/"
+    set_cookie = h.wfile.getvalue().split(b"\r\n\r\n", 1)[0].decode("latin1").lower()
+    assert "set-cookie: harbor_session=" in set_cookie
+
+
+def _read_response_head(handler):
+    """Return (status_line, full_header_block) from a handler's wfile."""
+    raw = handler.wfile.getvalue()
+    head, _, _ = raw.partition(b"\r\n\r\n")
+    return head.split(b"\r\n", 1)[0].decode("latin1"), head.decode("latin1")
+
+
+def test_post_action_with_session_cookie(tmp_path):
+    """POSTs authenticate via the session cookie (sent same-origin by browsers)."""
+    server.AUTH_TOKEN = "launch-123"
+    server.SESSION_SECRET = b"test-secret-16-bytes!!"
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
+    cookie = server._new_session_cookie("127.0.0.1:8765")
 
-    h = _make_handler("POST", "/api/rescan?token=secret123", body=b"{}")
+    headers = {"Cookie": f"{server.SESSION_COOKIE}={cookie}", "Host": "127.0.0.1:8765"}
+    h = _make_handler("POST", "/api/rescan", body=b"{}", headers=headers)
     h.do_POST()
     status, body = _read_response(h)
     assert status == 200
     assert body["ok"] is True
 
 
-def test_bearer_token_auth(tmp_path):
-    """Token can also be passed via Authorization: Bearer header."""
-    server.AUTH_TOKEN = "secret123"
-    server.app_state.config_path = str(tmp_path / "config.toml")
-    server.app_state.repos = {}
-
-    headers = {"Authorization": "Bearer secret123"}
-    h = _make_handler("GET", "/api/repos", body=b"", headers=headers)
-    h.do_GET()
-    status, body = _read_response(h)
-    assert status == 200
-    assert isinstance(body, list)
-
-
 def test_no_auth_token_means_no_auth_required(tmp_path):
-    """When AUTH_TOKEN is None, no token is needed (backwards compatible)."""
+    """When auth is fully disabled (None), requests pass without any credential."""
     assert server.AUTH_TOKEN is None  # fixture default
+    assert server.SESSION_SECRET is None
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
 
@@ -456,10 +589,10 @@ def test_no_auth_token_means_no_auth_required(tmp_path):
     assert isinstance(body, list)
 
 
-def test_sse_stream_requires_token(tmp_path):
-    """SSE stream endpoint also requires a token."""
-    server.AUTH_TOKEN = "secret123"
-    # The /api/stream route is a GET — verify it's blocked without token
+def test_sse_stream_requires_session(tmp_path):
+    """SSE stream endpoint also requires a valid session cookie."""
+    server.AUTH_TOKEN = "launch-123"
+    server.SESSION_SECRET = b"test-secret-16-bytes!!"
     server.JOBS.clear()
     h = _make_handler("GET", "/api/stream?job=nonexistent", body=b"")
     h.do_GET()

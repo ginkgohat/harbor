@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
@@ -196,6 +197,13 @@ def repo_status(repo):
 
 STATUS_WORKERS = 8
 
+# A single process-wide executor reused across status refreshes.  Creating an
+# executor per request under the 30s polling loop would tear down and rebuild
+# 8 worker threads every cycle; sharing one avoids that constant churn.
+# ThreadPoolExecutor cleans its threads up via atexit, so this needs no
+# explicit shutdown.
+_EXECUTOR = ThreadPoolExecutor(max_workers=STATUS_WORKERS)
+
 
 def get_repos_status(repos):
     """Return status for every repo in *repos*, collected concurrently.
@@ -204,9 +212,8 @@ def get_repos_status(repos):
     cuts total refresh latency roughly by the worker count and keeps one
     slow repo from extending the tail linearly.
     """
-    with ThreadPoolExecutor(max_workers=STATUS_WORKERS) as ex:
-        # map() preserves input order, matching the previous serial output.
-        return list(ex.map(repo_status, repos.values()))
+    # map() preserves input order, matching the previous serial output.
+    return list(_EXECUTOR.map(repo_status, repos.values()))
 
 
 def _repo_path(repo) -> str:
@@ -287,8 +294,13 @@ def get_diff(path, repos):
         return None
     repo_path = _repo_path(repo)
     _, tracked_diff, _ = run_git(repo_path, "diff", "HEAD", "--", ".")
-    _, status_out, _ = run_git(repo_path, "status", "--porcelain")
-    untracked = [line[3:] for line in status_out.splitlines() if line.startswith("??")]
+    # ``-z`` disables core.quotePath's C-style quoting, so filenames come back
+    # raw (unquoted) with NUL separators.  Splitting on NUL then strips the
+    # ``?? `` prefix intact even for paths with spaces / control characters.
+    _, status_out, _ = run_git(repo_path, "status", "--porcelain", "-z")
+    untracked = [
+        token[3:] for token in status_out.split(chr(0)) if token.startswith("?? ")
+    ]
     truncated = False
     encoded = tracked_diff.encode("utf-8", errors="replace")
     if len(encoded) > MAX_DIFF_BYTES:
@@ -321,9 +333,13 @@ def do_action(path: str, action: str, repos) -> ActionOutcome:
     elif action == "stash":
         rc, out, err = run_git(repo_path, "stash", "push", "-u", "-m", "harbor")
     elif action == "discard":
-        rc1, out1, err1 = run_git(repo_path, "checkout", "--", ".")
-        rc2, out2, err2 = run_git(repo_path, "clean", "-fd")
-        rc, out, err = (rc1 or rc2), out1 + out2, err1 + err2
+        # Recoverable discard: stash (including untracked) instead of a hard
+        # ``checkout -- . && clean -fd``.  Changes leave the working tree but
+        # can be restored later with ``git stash apply``.  The message makes
+        # these entries distinguishable from normal stash/pause stashes.
+        rc, out, err = run_git(
+            repo_path, "stash", "push", "-u", "-m", f"harbor:discard {int(time.time())}"
+        )
     elif action == "checkout-main":
         target = _default_branch(repo_path)
         if not target:

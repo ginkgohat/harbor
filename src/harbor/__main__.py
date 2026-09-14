@@ -31,6 +31,16 @@ from .state import AppState
 
 logger = logging.getLogger(__name__)
 
+# CLI subcommands.  Module constant so the ``_parse_args`` heuristic and
+# tests share one source of truth.
+SUBCOMMANDS = {"serve", "update", "uninstall", "start", "status", "stop"}
+# Flags meaningful only without a subcommand (print top-level help/version).
+TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
+# Standard end-of-options marker.  Everything after ``--`` is a positional
+# (root path), so a directory named ``status`` or starting with ``-`` works:
+# ``harbor -- status``, ``harbor -- -my-dir``.
+END_OF_OPTIONS = "--"
+
 
 def _create_server(port: int) -> http.server.ThreadingHTTPServer:
     """Create and return a ThreadingHTTPServer bound to *port*.
@@ -187,34 +197,42 @@ def _build_parser() -> argparse.ArgumentParser:
 def _parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
     """Parse args, falling back to ``serve`` when no subcommand is given.
 
-    Rules:
-    - If the first non-flag arg is a known subcommand, parse normally.
-    - If the first arg is ``-h`` / ``--help`` / ``--version``, show the
-      top-level help (which lists all subcommands).
-    - Otherwise, treat everything as positional args / flags for ``serve``
-      so that ``harbor ~/projects`` and ``harbor --port 9000`` still work.
-    """
-    subcommands = {"serve", "update", "uninstall", "start", "status", "stop"}
-    flag_like = {"-h", "--help", "--version"}
+    Argparse can't express "subcommand XOR default-to-serve" in one tree, so
+    we make a single judgment call: a known subcommand wins if it is the first
+    non-option token (``harbor status``, ``harbor update``).  Everything else
+    — paths, flags, ``--``-escaped paths — is routed through ``serve``.
 
-    # Find the first non-flag argument (doesn't start with "-").
+    Rules:
+    - ``harbor status``/``serve``/etc. → parse as that subcommand.
+    - A leading ``--`` forces the rest to be ``serve`` paths, so a directory
+      named ``status`` or starting with ``-`` still works (``harbor -- status``,
+      ``harbor -- -my-dir``).
+    - ``harbor -h``/``--version`` with no other args → top-level help/version.
+    - Otherwise (``harbor ~/projects``, ``harbor --port 9000``) → ``serve``.
+    """
+    argv = sys.argv[1:]
+
+    # First non-option token, honouring a ``--`` end-of-options marker.
+    seen_sep = False
     first_positional = None
-    for arg in sys.argv[1:]:
+    for arg in argv:
+        if arg == END_OF_OPTIONS:
+            seen_sep = True
+            continue
         if not arg.startswith("-"):
             first_positional = arg
             break
 
-    if first_positional is not None and first_positional in subcommands:
-        # Explicit subcommand — parse normally.
-        return parser.parse_args()
+    if not seen_sep and first_positional is not None and first_positional in SUBCOMMANDS:
+        # Explicit subcommand — use the normal subparser tree.
+        return parser.parse_args(argv)
 
-    if first_positional is None and any(a in flag_like for a in sys.argv[1:]):
-        # No subcommand and user is asking for top-level help / version.
-        return parser.parse_args()
+    if first_positional is None and any(a in TOP_LEVEL_FLAGS for a in argv):
+        # No subcommand and the user asked for top-level help / version.
+        return parser.parse_args(argv)
 
     # Default to "serve".
-    argv = [sys.argv[0], "serve", *sys.argv[1:]]
-    return parser.parse_args(argv[1:])
+    return parser.parse_args(["serve", *argv])
 
 
 def main():
@@ -256,13 +274,25 @@ def _run_server(args) -> int:
     config = config_mod.load_config(args.config)
 
     # --- Resolve settings ---------------------------------------------
-    port = config_mod.resolve_setting(args.port, "HARBOR_PORT", "port", config, 8765)
-    min_depth = config_mod.resolve_setting(
-        args.min_depth, "HARBOR_MIN_DEPTH", "min_depth", config, 1
-    )
-    max_depth = config_mod.resolve_setting(
-        args.max_depth, "HARBOR_MAX_DEPTH", "max_depth", config, 5
-    )
+    # Values come from CLI / env / config file.  resolve_int_setting converts the
+    # env string and validates range, raising a clear ValueError on bad input so
+    # we can print a friendly line instead of a raw traceback.
+    try:
+        port = config_mod.resolve_int_setting(
+            args.port, "HARBOR_PORT", "port", config, 8765, 1, 65535, "port"
+        )
+        min_depth = config_mod.resolve_int_setting(
+            args.min_depth, "HARBOR_MIN_DEPTH", "min_depth", config, 1, 0, 99, "min_depth"
+        )
+        max_depth = config_mod.resolve_int_setting(
+            args.max_depth, "HARBOR_MAX_DEPTH", "max_depth", config, 5, 0, 99, "max_depth"
+        )
+    except ValueError as e:
+        logger.error("%s", e)
+        sys.exit(1)
+    if max_depth < min_depth:
+        logger.error("max_depth (%d) must be >= min_depth (%d)", max_depth, min_depth)
+        sys.exit(1)
 
     # --- Resolve roots ------------------------------------------------
     roots = config_mod.resolve_roots(args.roots, config)
@@ -319,6 +349,29 @@ def _run_server(args) -> int:
         )
         with os.fdopen(fd, "w") as f:
             f.write(token + "\n")
+        # Session-signing secret (0600).  Loaded-or-created so signed cookies
+        # survive restarts; if the file can't be written we still fall back to
+        # an in-memory secret so the current run keeps working.
+        if _daemon_mod.SESSION_SECRET_FILE.exists():
+            server_mod.SESSION_SECRET = _daemon_mod.SESSION_SECRET_FILE.read_bytes()
+        else:
+            secret = os.urandom(32)
+            import contextlib
+
+            try:
+                with contextlib.suppress(FileNotFoundError):
+                    _daemon_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
+                sfd = os.open(
+                    str(_daemon_mod.SESSION_SECRET_FILE),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                with os.fdopen(sfd, "wb") as f:
+                    f.write(secret)
+            except OSError:
+                # Non-fatal — fall back to the in-memory secret.
+                pass
+            server_mod.SESSION_SECRET = secret
         # Clean up both on exit (works for foreground mode; daemon mode
         # already has its own atexit handler registered in daemon.py).
         atexit.register(_daemon_mod._remove_pid)

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
 import http.server
 import json
 import logging
@@ -35,7 +39,22 @@ JOBS = {}
 #
 # This protects against CSRF, DNS rebinding, and random local processes
 # discovering the port and calling destructive endpoints (discard, etc.).
+# Launch token — the single-use entry credential printed / opened at startup
+# (``/?token=<launch>``).  It is ONLY accepted for the one-time exchange that
+# turns it into a signed session cookie (see ``_get_index``); the launch token
+# itself is never accepted by API/SSE routes (see ``_check_token``).
 AUTH_TOKEN: str | None = None
+
+# HMAC key used to sign web-session cookies.  Persisted across restarts (see
+# __main__.py) so a browser's cookies survive a server restart.  ``None`` here
+# means the signing feature is disabled (used by tests for unauth'd requests).
+SESSION_SECRET: bytes | None = None
+
+# Signed cookie that authenticates every fetch/SSE request (browsers send it
+# same-origin automatically, so the token no longer needs to appear in URLs).
+SESSION_COOKIE = "harbor_session"
+SESSION_MAX_AGE_DAYS = 30
+_SESSION_SEP = "|"  # separator inside the signed payload; never in host:port
 
 # A job whose SSE consumer never read its "done" event (client disconnect)
 # would otherwise sit in JOBS forever.  Sweep entries older than this TTL
@@ -43,6 +62,12 @@ AUTH_TOKEN: str | None = None
 JOB_TTL_SECONDS = 3600
 
 MAX_WORKERS = 8
+
+# Upper bound on the JSON body accepted from clients.  A malicious or runaway
+# client that sends a huge "Content-Length" (or a streamed body) would otherwise
+# be read into memory and could OOM the process.  Legitimate requests (a token
+# form field, a roots list, a small action payload) are far below this.
+MAX_BODY_BYTES = 1024 * 1024
 
 # The UI is a single self-contained page with inline <script>/<style>, so
 # 'unsafe-inline' is unavoidable without a build step — but we still forbid
@@ -80,12 +105,27 @@ def _route(method, pattern):
 
 @_route("GET", r"^/$")
 def _get_index(self, m, parsed, body):
+    """Serve the app.  A request to ``/?token=<launch>`` performs the one-time
+    launch-token exchange: issue a signed session cookie, then redirect to the
+    clean ``/`` so the token leaves the address bar and browser history."""
+    if AUTH_TOKEN is not None:
+        qs = parse_qs(parsed.query)
+        launch = (qs.get("token") or [None])[0]
+        if launch and SESSION_SECRET is not None and launch == AUTH_TOKEN:
+            host = self.headers.get("Host", "")
+            self.send_response(302)
+            self._set_session_cookie(_normalize_hostport(host))
+            self.send_header("Location", "/")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
     self._serve_html()
 
 
 @_route("POST", r"^/login$")
 def _post_login(self, m, parsed, body):
-    """Token entry form submission.  On success, redirect to `/?token=...`."""
+    """Token entry form submission.  On success, issue a session cookie and
+    redirect to the clean ``/`` (no token in the URL)."""
     # Accept both form-encoded and JSON bodies.
     if isinstance(body, dict):
         token = (body.get("token") or "").strip()
@@ -94,7 +134,15 @@ def _post_login(self, m, parsed, body):
         token = (qs.get("token") or [""])[0].strip()
 
     if AUTH_TOKEN is None or token == AUTH_TOKEN:
-        self._send_json(200, {"ok": True, "redirect": "/?token=" + token})
+        self._send_json(
+            200,
+            {"ok": True, "redirect": "/"},
+            set_cookie=(
+                _normalize_hostport(self.headers.get("Host", ""))
+                if SESSION_SECRET is not None
+                else None
+            ),
+        )
         return
     self._send_json(401, {"ok": False, "error": "invalid token"})
 
@@ -227,9 +275,75 @@ def _delete_root(self, m, parsed, body):
 # Helpers
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True if the ``Host`` header names a loopback endpoint.
+
+    Handles ``host``, ``host:port``, and bracketed IPv6 like ``[::1]:8765``.
+    """
+    if host.startswith("["):
+        hostname = host.split("]", 1)[0][1:]
+    else:
+        hostname = host.rsplit(":", 1)[0]
+    hostname = hostname.strip().lower()
+    return hostname in ("127.0.0.1", "localhost", "::1")
+
+
+def _normalize_hostport(host: str) -> str:
+    """Normalize the ``Host`` header for cookie binding (hostname[:port])."""
+    return host.strip().lower()
+
+
+def _new_session_cookie(hostport: str) -> str:
+    """Return a signed ``value`` for a session cookie bound to *hostport*.
+
+    Format ``<hmac_sha256>.<urlsafe_b64(payload)>`` where payload is
+    ``<expiry_epoch>|<hostport>``.  The host:port is baked in so a cookie issued
+    for one port is invalid on another (mirrors the anti-collision design).
+    """
+    exp = int(time.time()) + SESSION_MAX_AGE_DAYS * 86400
+    payload = f"{exp}{_SESSION_SEP}{hostport}".encode()
+    sig = hmac.new(SESSION_SECRET, payload, hashlib.sha256).hexdigest()
+    enc = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"{sig}.{enc}"
+
+
+def _valid_session_cookie(value: str, hostport: str) -> bool:
+    """Validate a session cookie's signature, expiry, and host:port binding."""
+    if not value:
+        return False
+    if SESSION_SECRET is None:
+        # Signing disabled — accept anything (tests / no-auth mode).
+        return True
+    try:
+        sig, enc = value.split(".", 1)
+        payload = base64.urlsafe_b64decode(enc + "=" * (-len(enc) % 4))
+        exp_s, _, bound = payload.decode("utf-8").partition(_SESSION_SEP)
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError):
+        return False
+    good_sig = hmac.compare_digest(
+        sig, hmac.new(SESSION_SECRET, payload, hashlib.sha256).hexdigest()
+    )
+    if not good_sig:
+        return False
+    if bound != hostport:
+        return False
+    try:
+        if int(exp_s) < time.time():
+            return False
+    except ValueError:
+        return False
+    return True
+
+
+def _extract_cookie(header: str, name: str) -> str | None:
+    """Pull the value of the named cookie out of a raw ``Cookie`` header."""
+    prefix = name + "="
+    for part in header.split(";"):
+        part = part.strip()
+        if part.startswith(prefix):
+            return part[len(prefix):]
+    return None
 
 
 def _outcome_http_code(outcome) -> int:
@@ -311,14 +425,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _send_json(self, code, obj):
+    def _send_json(self, code, obj, set_cookie=None):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", CSP_HEADER)
         self.send_header("Content-Length", str(len(body)))
+        if set_cookie:
+            self._set_session_cookie(set_cookie)
         self.end_headers()
         self.wfile.write(body)
+
+    def _set_session_cookie(self, hostport: str):
+        """Set the signed, HttpOnly session cookie for *hostport*."""
+        value = _new_session_cookie(hostport)
+        self.send_header(
+            "Set-Cookie",
+            f"{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; "
+            f"Max-Age={SESSION_MAX_AGE_DAYS * 86400}",
+        )
 
     def _check_origin(self):
         """Return True if the request may proceed; False if 403 was sent.
@@ -338,6 +463,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         if parsed.netloc and host and parsed.netloc != host:
             self._send_json(403, {"ok": False, "error": "cross-origin blocked"})
+            return False
+        if host and not _is_loopback_host(host):
+            self._send_json(403, {"ok": False, "error": "non-loopback host"})
             return False
         return True
 
@@ -467,25 +595,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         )
 
     def _check_token(self, parsed) -> bool:
-        """Return True if the request has a valid auth token (or none is needed).
+        """Return True if the request carries a valid session cookie.
 
         Sends a 403 and returns False when auth is required but missing/wrong.
+        The launch token is intentionally NOT accepted here — it is a one-time
+        entry credential exchanged for the cookie on ``/`` and must never
+        authenticate API/SSE routes directly.
         """
-        if AUTH_TOKEN is None:
+        if AUTH_TOKEN is None and SESSION_SECRET is None:
             return True
         if self._is_static_or_root(parsed):
             return True
-        qs = parse_qs(parsed.query)
-        token = (qs.get("token") or [None])[0]
-        # Also accept token in POST body for routes that read JSON bodies.
-        if not token:
-            auth_header = self.headers.get("Authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[len("Bearer ") :]
-        if token != AUTH_TOKEN:
-            self._send_json(403, {"ok": False, "error": "invalid or missing token"})
-            return False
-        return True
+        host = self.headers.get("Host", "")
+        header = self.headers.get("Cookie", "")
+        value = _extract_cookie(header, SESSION_COOKIE)
+        if value and _valid_session_cookie(value, _normalize_hostport(host)):
+            return True
+        self._send_json(
+            403, {"ok": False, "error": "authentication required (missing or invalid session"}
+        )
+        return False
 
     def _dispatch(self, method, parsed, body=None):
         # Token check is centralized here — every non-static route is protected.
@@ -506,6 +635,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _read_json_body(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > MAX_BODY_BYTES:
+            return None  # caller turns this into a 413
         raw = self.rfile.read(length) if length else b""
         try:
             return json.loads(raw) if raw else {}
@@ -516,6 +647,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._dispatch("GET", urlparse(self.path))
 
     def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > MAX_BODY_BYTES:
+            self._send_json(413, {"ok": False, "error": "request body too large"})
+            return
         body = self._read_json_body()
         if body is None:
             self._send_json(400, {"ok": False, "error": "invalid JSON body"})
