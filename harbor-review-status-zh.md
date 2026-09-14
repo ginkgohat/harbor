@@ -11,9 +11,9 @@
 
 | | 数量 |
 |---|---|
-| ✅ 已完成 | 23 |
-| 🕐 剩余待办 | 2 组（中 2 / 低 0；较高已清） |
-| 基线 | 本地：184 测试（162 非 e2e + 22 e2e）全绿；ruff 干净；前端 JS 34 通过；mypy `--strict` 0 错 |
+| ✅ 已完成 | 26 |
+| 🕐 剩余待办 | 0 组（较高/中/低全部清空） |
+| 基线 | 本地：196 测试（170 非 e2e + 22 e2e）全绿；ruff 干净；前端 JS 34 通过；mypy `--strict` 0 错 |
 | CI | `lint` / `build` / `test`（5 矩阵）/ `e2e`（单 Linux + py3.12） |
 
 ---
@@ -45,6 +45,9 @@
 | 21 | DNS rebinding（安全#2） | 完成项 #9 的 `_is_loopback_host` Host 校验本已阻塞非回环 Host（rebinding 下 Host=攻击者域名 → 403），是核心防线；SECURITY.md 补边界说明 + 既有测试佐证。 | `test_is_loopback_host` / `test_mutating_request_rejects_non_loopback_host` |
 | 22 | mypy strict（L1） | 全部 10 个源文件补全注解，`mypy --strict src/harbor` 从 153 错 → 0 错；`pyproject.toml` `strict=true`；Makefile `lint` 去掉 `|| echo`，mypy 成为真实 CI 门禁。顺手修真隐患：`hmac.new` 的 `SESSION_SECRET` None 未排除、`with os.fdopen(...,"wb") as f` 复用变量名。 | `make lint`、mypy --strict |
 | 23 | `requires-python` 上界（L2） | `>=3.10,<3.15` 已在位且与分类器一致（本地验证于 3.14.7）；无代码改动，留待 3.15 发布时复查。 | `python3.14` import/运行 |
+| 24 | 模块级全局状态解耦（M2/Arch#1） | 6 个模块级单例（app_state、AUTH_TOKEN、SESSION_SECRET、JOBS/JOBS_LOCK、_LOGIN_FAILURES/_LOGIN_LOCK）收敛为单个 `HarborApp`（state.py，由 AppState 更名）；锁按实例独立；`__main__` 不再 `server_mod.AUTH_TOKEN=...` 逐项注入；测试 fixture 改为一次替换全量重置。 | 162+22 全绿 |
+| 25 | 后台轮询 + 快照缓存（M1/Perf#1） | `/api/repos` 每 30s 每 repo 一个 `git status` 子进程 → 单条 daemon 刷新线程每周期算一次全量快照（共享 executor），请求端为 O(1) 缓存读；rescan 完成即失效快照、action 后按路径更新快照、快照为空且 repos 非空时按需现场计算兜底。新增 6 测试。 | 168+22 全绿 |
+| 26 | rescan 提速（M1/Perf#2） | `scan_roots` 每 repo 1–6 个子进程探测 default branch 是主导成本（60 repo 实测 1.00s）；新增跨扫描 TTL 缓存（300s），热 rescan 0.001s。完整异步 rescan（立即返回+通知）评估后不取，记入决策表。新增 2 测试。 | 170+22 全绿 |
 
 ---
 
@@ -52,20 +55,20 @@
 
 ### 高优先级
 
-- [ ] **H1. e2e 上 CI**
+- [x] **H1. e2e 上 CI**
   状态：✅ **已完成**（见二.#8，2025 由本清单采纳）。
   遗留可选瘦身：若 CI 分钟紧张，可只跑关键 e2e（登录/discard/批量）或改 `workflow_dispatch` 手动触发。
 
 ### 中优先级
 
-- [ ] **M1. 全量 `git status` 轮询 + 同步 rescan（Perf#1/#2）**
-  - 现状：依赖扫描仍有同步阻塞；是最重的遗留项。
-  - 成本/风险：改动面大、风险高；需分步做并保住 181 测试。
-  - 建议：拆分小步（先轮询后 rescan），每步可验证。
+- [x] **M1. 全量 `git status` 轮询 + 同步 rescan（Perf#1/#2）—— ✅ 已完成（见二.#25/#26）**
+  - Perf#1：后台常驻刷新线程 + 快照缓存，`/api/repos` 变成 O(1) 缓存读。
+  - Perf#2：跨扫描 default_branch 缓存（TTL 300s），实测 60 repo 冷扫描 0.85s → 热 rescan 0.001s。
+  - 完整异步 rescan（立即返回 + 通知）经评估后不取——残余成本只剩单次 os.walk，且需改响应契约 + e2e 时序（见决策记录）。
 
-- [ ] **M2. 模块级全局状态解耦（Arch#1）**
-  - 现状：`server.py`/`git.py` 用模块全局（executor、SESSION_SECRET、AUTH_TOKEN、state）。
-  - 说明：cookie 认证已为持久 secret 打好基础，完整解耦是一次中等规模重构。
+- [x] **M2. 模块级全局状态解耦（Arch#1）—— ✅ 已完成（见二.#24）**
+  - 6 个模块级单例（app_state、AUTH_TOKEN、SESSION_SECRET、JOBS/JOBS_LOCK、_LOGIN_*）收敛为单个 `HarborApp` 对象（state.py），锁按实例独立。
+  - 测试 fixture 一次替换即全量重置；多实例可在同一进程共存。
 
 - [x] **M3. diff 大渲染虚拟化（Perf#3）—— ✅ 已完成（见二.#20，选轻量方案：`<pre>`+`textContent` 单文本节点，放弃逐行高亮；全局无需完整虚拟滚动）**
 
@@ -91,6 +94,9 @@
 |---|---|---|
 | API 认证 | 会话 cookie（不用 Bearer/首 token） | token 进 URL 会泄漏进日志/历史；cookie 更贴近普通浏览器安全模型 |
 | discard | `git stash push -u`（可恢复）而非 `checkout -- . && clean -fd` | 提供撤回路径；保留"离开工作区"效果 |
+| M2 状态所有权 | 所有可变状态收敛进单个 `HarborApp` 对象，保留唯一注入点 `server.app_state`；不做 handler 构造器/闭包注入 | 评审建议的闭包注入需重写 ~110 行测试 harness，零用户收益；单对象 + 原子重置已消除散落全局与跨测试污染，多实例可在同一进程共存 |
+| M1 Perf#1 | 后台常驻刷新线程 + 快照缓存，`/api/repos` 为缓存读；空快照且非空 repos 时按需现场计算兜底 | 消除每轮询每个 repo 一个子进程；跨标签页共享一次刷新；响应形状不变，前端零改动 |
+| M1 Perf#2 | 跨扫描 default_branch 缓存（TTL 300s）替代完整异步 rescan | 实测热 rescan 0.001s（原 1.00s）；异步需改 /api/rescan 契约 + 前端轮询 + e2e 时序，为残余单次 os.walk 不值当 |
 | bulkRun 并发 | 客户端 worker 池（并发 4）+ 进度 | 低成本解决无上限/乱序；不强上服务端 SSE job 引擎 |
 | e2e CI | 独立 job，单 Linux + 单 Python | e2e 测浏览器行为，与版本/OS 无关；避免矩阵重复 |
 | `_parse_args` | 既有“无子命令→serve”启发式 + `--` 转义 | argparse 无法简洁表达“子命令 XOR 默认 serve”；最小改动 |
