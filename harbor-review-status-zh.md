@@ -11,10 +11,10 @@
 
 | | 数量 |
 |---|---|
-| ✅ 已完成 | 26 |
-| 🕐 剩余待办 | 0 组（较高/中/低全部清空） |
+| ✅ 已完成 | 28 |
+| 🕐 剩余待办 | 0 组（较高/中/低全部清空；两个可选 follow-up 也已做完） |
 | 基线 | 本地：196 测试（170 非 e2e + 22 e2e）全绿；ruff 干净；前端 JS 34 通过；mypy `--strict` 0 错 |
-| CI | `lint` / `build` / `test`（5 矩阵）/ `e2e`（单 Linux + py3.12） |
+| CI | `lint` / `build` / `test`（5 矩阵）/ `e2e`（官方 Playwright 镜像容器，免 apt 免浏览器下载） |
 
 ---
 
@@ -48,6 +48,8 @@
 | 24 | 模块级全局状态解耦（M2/Arch#1） | 6 个模块级单例（app_state、AUTH_TOKEN、SESSION_SECRET、JOBS/JOBS_LOCK、_LOGIN_FAILURES/_LOGIN_LOCK）收敛为单个 `HarborApp`（state.py，由 AppState 更名）；锁按实例独立；`__main__` 不再 `server_mod.AUTH_TOKEN=...` 逐项注入；测试 fixture 改为一次替换全量重置。 | 162+22 全绿 |
 | 25 | 后台轮询 + 快照缓存（M1/Perf#1） | `/api/repos` 每 30s 每 repo 一个 `git status` 子进程 → 单条 daemon 刷新线程每周期算一次全量快照（共享 executor），请求端为 O(1) 缓存读；rescan 完成即失效快照、action 后按路径更新快照、快照为空且 repos 非空时按需现场计算兜底。新增 6 测试。 | 168+22 全绿 |
 | 26 | rescan 提速（M1/Perf#2） | `scan_roots` 每 repo 1–6 个子进程探测 default branch 是主导成本（60 repo 实测 1.00s）；新增跨扫描 TTL 缓存（300s），热 rescan 0.001s。完整异步 rescan（立即返回+通知）评估后不取，记入决策表。新增 2 测试。 | 170+22 全绿 |
+| 27 | 完整异步 rescan（follow-up） | `POST /api/rescan` 立即返回 `{ok,pending}`，扫描在 daemon worker 上跑；worker 换入新 repo 集 + 预计算状态快照 + 递增 `scan_generation`（`/api/repos` 经 `X-Harbor-Scan-Gen` 头上报）；前端 `waitForScan` 轮询到 generation 前进才更新网格（refresh / 增删 root 三处统一）；单飞 + `rescan_requested` 重跑旗标防遗漏。响应契约从同步 `{roots,count,...}` 改为 `{ok,pending}`（已同步更新测试）。 | 170+22 全绿 |
+| 28 | CI e2e 瘦身（follow-up） | e2e job 改用官方 `mcr.microsoft.com/playwright/python:v1.62.0-noble` 容器（内置 py3.12 + Chromium + 全部系统库）；pin `playwright==1.62.0` 与镜像版本对齐 → `playwright install chromium` 为 0.2s no-op；job 内联 make 对应三条命令（镜像无 make）免 apt。顺手修 browse e2e 对「空家目录」的环境脆弱断言（容器 root 家目录只有隐藏目录）。容器内实测 22/22 全绿。 | 容器内 22/22、宿主 170+22 |
 
 ---
 
@@ -57,14 +59,14 @@
 
 - [x] **H1. e2e 上 CI**
   状态：✅ **已完成**（见二.#8，2025 由本清单采纳）。
-  遗留可选瘦身：若 CI 分钟紧张，可只跑关键 e2e（登录/discard/批量）或改 `workflow_dispatch` 手动触发。
+  ✅ 后续瘦身已做：e2e job 改用官方 Playwright 镜像容器，免 apt 免浏览器下载（见二.#28）。
 
 ### 中优先级
 
 - [x] **M1. 全量 `git status` 轮询 + 同步 rescan（Perf#1/#2）—— ✅ 已完成（见二.#25/#26）**
   - Perf#1：后台常驻刷新线程 + 快照缓存，`/api/repos` 变成 O(1) 缓存读。
   - Perf#2：跨扫描 default_branch 缓存（TTL 300s），实测 60 repo 冷扫描 0.85s → 热 rescan 0.001s。
-  - 完整异步 rescan（立即返回 + 通知）经评估后不取——残余成本只剩单次 os.walk，且需改响应契约 + e2e 时序（见决策记录）。
+  - 完整异步 rescan（立即返回 + 通知）✅ 后续已做（见二.#27）：`/api/rescan` 立即返回，扫描在 daemon worker 上跑，前端轮询 generation 更新。
 
 - [x] **M2. 模块级全局状态解耦（Arch#1）—— ✅ 已完成（见二.#24）**
   - 6 个模块级单例（app_state、AUTH_TOKEN、SESSION_SECRET、JOBS/JOBS_LOCK、_LOGIN_*）收敛为单个 `HarborApp` 对象（state.py），锁按实例独立。
@@ -99,6 +101,8 @@
 | M1 Perf#2 | 跨扫描 default_branch 缓存（TTL 300s）替代完整异步 rescan | 实测热 rescan 0.001s（原 1.00s）；异步需改 /api/rescan 契约 + 前端轮询 + e2e 时序，为残余单次 os.walk 不值当 |
 | bulkRun 并发 | 客户端 worker 池（并发 4）+ 进度 | 低成本解决无上限/乱序；不强上服务端 SSE job 引擎 |
 | e2e CI | 独立 job，单 Linux + 单 Python | e2e 测浏览器行为，与版本/OS 无关；避免矩阵重复 |
+| M1 异步 rescan（follow-up） | `/api/rescan` 改为立即返回 `{ok,pending}`，扫描放 daemon worker（单飞 + 重跑旗标）；前端轮询 `X-Harbor-Scan-Gen` 头等 generation 前进 | 大目录树不再阻塞请求线程；先前因「残余成本仅单次 os.walk」暂缓，用户选择跟进实现 |
+| e2e CI 镜像（follow-up） | e2e job 用官方 Playwright Python 镜像容器 + pin `playwright` 版本对齐（1.62.0）；放弃 `--with-deps` 与浏览器下载 | 镜像内置 py3.12+Chromium+系统库；apt 步骤容器内实测 55s，镜像省掉；pin 使 `playwright install` 为 no-op。代价：playwright 发版需同步 pyproject 与镜像 tag |
 | `_parse_args` | 既有“无子命令→serve”启发式 + `--` 转义 | argparse 无法简洁表达“子命令 XOR 默认 serve”；最小改动 |
 | `/login` 限流 | 每客户端滚动窗口计数（60s / 5 次）后 429，成功后清零 | 单机本地工具，按客户端维度即可；无需全局/分布式锁 |
 | SSE 队列 | 有界 `Queue(maxsize=1024)` 提供背压而非无限积压 | 无消费者时不再无界占用内存；worker 为 daemon 线程，阻塞不影响进程退出 |

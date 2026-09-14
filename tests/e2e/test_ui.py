@@ -673,12 +673,14 @@ def test_browse_directory_navigation(page, server_url, tmp_path):
     page.wait_for_selector("#settingsOverlay.show", timeout=5000)
     page.wait_for_selector("#browseList", timeout=5000)
 
-    # Quick nav: Home button loads a path
+    # Quick nav: Home button loads a path.  The home directory may legitimately
+    # hold no visible (non-hidden) subdirectories — e.g. a CI container running
+    # as root where /root only contains dot-dirs — so accept either a rendered
+    # item list or the empty state as proof the nav loaded.
     page.locator('#browseQuick button[data-path="~"]').click()
-    # Wait for browse list to render items
-    page.wait_for_selector("#browseList .browse-item", timeout=5000)
-    home_items = page.locator("#browseList .browse-item").count()
-    assert home_items > 0
+    page.wait_for_selector(
+        "#browseList .browse-item, #browseList .browse-empty", timeout=5000
+    )
 
     # Quick nav: root button works
     page.locator('#browseQuick button[data-path="/"]').click()
