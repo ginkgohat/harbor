@@ -1154,21 +1154,44 @@ setTimeout(_initSyncedStripA11y, 100);
 
 
 /* ---------- refresh / rescan ---------- */
+// Scan generation seen in the most recent /api/repos response.  A background
+// rescan bumps it server-side; waitForScan() polls until it advances so the
+// UI updates only after the new repo set is actually published.
+let lastScanGen = 0;
+
+async function waitForScan(beforeGen, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250));
+    const res = await fetch(`/api/repos`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) continue;
+    const gen = parseInt(res.headers.get("X-Harbor-Scan-Gen") || "0", 10);
+    if (!Number.isNaN(gen) && gen > beforeGen) {
+      repos = await res.json();
+      lastScanGen = gen;
+      render();
+      return repos.length;
+    }
+  }
+  return null; // timed out — caller falls back to loadRepos()
+}
+
 $("#refreshBtn").addEventListener("click", async () => {
   const btn = $("#refreshBtn");
   btn.disabled = true;
   btn.style.opacity = "0.5";
   try {
-    const res = await fetch(`/api/rescan`, { method: "POST", signal: AbortSignal.timeout(30000) });
-    const data = await res.json();
-    if (data.ok) {
-      await loadRepos();
-      // Briefly show refresh confirmation in stats
-      const stats = $("#stats");
-      const original = stats.innerHTML;
-      stats.innerHTML = t("refreshDone", data.count);
-      setTimeout(() => { stats.innerHTML = original; render(); }, 1500);
-    }
+    const before = lastScanGen;
+    const res = await fetch(`/api/rescan`, { method: "POST", signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Rescan runs in the background — wait until it actually finished.
+    let n = await waitForScan(before, 15000);
+    if (n === null) { await loadRepos(); n = repos.length; }
+    // Briefly show refresh confirmation in stats
+    const stats = $("#stats");
+    const original = stats.innerHTML;
+    stats.innerHTML = t("refreshDone", n);
+    setTimeout(() => { stats.innerHTML = original; render(); }, 1500);
   } catch (err) {
     console.error("rescan failed:", err);
   } finally {
@@ -1216,6 +1239,8 @@ async function loadRepos() {
       return;
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const gen = parseInt(res.headers.get("X-Harbor-Scan-Gen") || "0", 10);
+    if (!Number.isNaN(gen)) lastScanGen = gen;
     repos = await res.json();
     render();
   } catch (err) {
@@ -1693,9 +1718,12 @@ $("#settingsRoots").addEventListener("click", async (e) => {
   const btn = e.target.closest(".del-btn");
   if (!btn) return;
   // Match by path (B-3) — the contract is symmetric with POST /api/roots.
+  const before = lastScanGen;
   await fetch(`/api/roots/${encodeURIComponent(btn.dataset.path)}`, { method: "DELETE" });
   await renderSettingsRoots();
-  await loadRepos();
+  // The rescan runs in the background — wait for it so the grid reflects the
+  // removed root (the roots list above is already updated synchronously).
+  if (await waitForScan(before, 15000) === null) await loadRepos();
 });
 
 const BROWSE_QUICK = [{ name: "Home", path: "~" }, { name: "/", path: "/" }];
@@ -1756,13 +1784,16 @@ $("#browseList").addEventListener("click", async (e) => {
 });
 
 async function addRoot(path, label) {
+  const before = lastScanGen;
   const res = await fetch(`/api/roots`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, label }),
   });
   if (res.ok) {
     await renderSettingsRoots();
-    await loadRepos();
+    // The rescan runs in the background — wait for it so the grid shows the
+    // newly discovered repos before the user closes settings.
+    if (await waitForScan(before, 15000) === null) await loadRepos();
   }
 }
 

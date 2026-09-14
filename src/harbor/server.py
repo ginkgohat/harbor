@@ -196,7 +196,11 @@ def _get_repos(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) 
     if not snapshot and app_state.repos:
         snapshot = {s["path"]: s for s in git_ops.get_repos_status(app_state.repos)}
         app_state.repo_status = snapshot
-    self._send_json(200, list(snapshot.values()))
+    self._send_json(
+        200,
+        list(snapshot.values()),
+        headers={"X-Harbor-Scan-Gen": str(app_state.scan_generation)},
+    )
 
 
 @_route("GET", r"^/api/roots$")
@@ -272,17 +276,14 @@ def _post_roots(
 def _post_rescan(
     self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
 ) -> None:
-    roots, repos = self._rescan()
-    self._send_json(
-        200,
-        {
-            "ok": True,
-            "roots": [{"path": p, "label": label} for p, label in roots],
-            "count": len(repos),
-            "min_depth": app_state.min_depth,
-            "max_depth": app_state.max_depth,
-        },
-    )
+    """Trigger a background rescan and return immediately.
+
+    The scan runs off the request thread; when it completes it bumps
+    ``app_state.scan_generation`` (reported via the X-Harbor-Scan-Gen header
+    on /api/repos), which the frontend polls for before updating the UI.
+    """
+    self._rescan()
+    self._send_json(200, {"ok": True, "pending": True})
 
 
 @_route("POST", r"^/api/repo/(?P<path>.+)/action$")
@@ -552,6 +553,68 @@ def start_status_refresher(app: HarborApp) -> None:
     app.refresher.start()
 
 
+# ---------------------------------------------------------------------------
+# Background rescan
+# ---------------------------------------------------------------------------
+
+
+def _request_rescan(app: HarborApp) -> None:
+    """Kick off a background rescan; returns immediately.
+
+    Single-flight: if a worker is already running, set ``rescan_requested`` so
+    it loops once more after finishing instead of missing this mutation (a
+    quick add-then-remove of roots while a scan is in flight would otherwise
+    serve a stale repo list until the next explicit refresh).
+    """
+    with app.rescan_lock:
+        if app.rescanning:
+            app.rescan_requested = True
+            return
+        app.rescanning = True
+    threading.Thread(
+        target=_rescan_worker, args=(app,), daemon=True, name="rescan-worker"
+    ).start()
+
+
+def _rescan_worker(app: HarborApp) -> None:
+    """Run background rescans until none are requested (single-flight loop).
+
+    Each pass re-scans all roots (fast for known repos thanks to the scanner's
+    cross-scan default-branch cache), swaps in the new repo set, computes a
+    fresh status snapshot so /api/repos is instant right after, and bumps
+    ``scan_generation`` — the signal the frontend polls for.
+    """
+    while True:
+        try:
+            config = config_mod.load_config(app.config_path) or {}
+            # Reload depth settings from config (CLI args remain supreme)
+            if app.cli_min_depth is None:
+                app.min_depth = config.get("min_depth", app.min_depth)
+            if app.cli_max_depth is None:
+                app.max_depth = config.get("max_depth", app.max_depth)
+            new_repos = scanner_mod.scan_roots(
+                app.roots,
+                min_depth=app.min_depth,
+                max_depth=app.max_depth,
+            )
+            # Pre-compute the status snapshot for the new set so the frontend's
+            # post-rescan /api/repos poll is instant (no on-demand blocking).
+            statuses = git_ops.get_repos_status(new_repos)
+            app.repos = new_repos
+            app.repo_status = {s["path"]: s for s in statuses}
+            app.scan_generation += 1
+        except Exception:
+            # Do not bump the generation — the frontend's wait times out and
+            # falls back to whatever it has; the error is logged for humans.
+            logger.exception("background rescan failed")
+        with app.rescan_lock:
+            if app.rescan_requested:
+                app.rescan_requested = False
+                continue
+            app.rescanning = False
+            return
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for the Harbor web UI.
 
@@ -564,12 +627,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _send_json(self, code: int, obj: Any, set_cookie: str | None = None) -> None:
+    def _send_json(
+        self,
+        code: int,
+        obj: Any,
+        set_cookie: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", CSP_HEADER)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         if set_cookie:
             self._set_session_cookie(set_cookie)
         self.end_headers()
@@ -695,29 +766,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Re-scan
     # ------------------------------------------------------------------
 
-    def _rescan(self) -> tuple[list[tuple[str, str]], dict[str, dict[str, Any]]]:
-        """Re-scan all roots and update app_state.repos.
+    def _rescan(self) -> None:
+        """Kick off a background rescan; returns immediately.
 
-        Also reloads min_depth / max_depth from the config file (unless
-        overridden by CLI arguments at startup).
+        The actual scan runs on a daemon worker (see ``_rescan_worker``) so a
+        huge root tree never blocks the request thread.  The worker swaps in
+        the new repo set, computes a fresh status snapshot, and bumps
+        ``app.scan_generation`` — the frontend polls /api/repos for that
+        counter to know when the scan is done.
         """
-        config = config_mod.load_config(app_state.config_path) or {}
-        # Reload depth settings from config (CLI args remain supreme)
-        if app_state.cli_min_depth is None:
-            app_state.min_depth = config.get("min_depth", app_state.min_depth)
-        if app_state.cli_max_depth is None:
-            app_state.max_depth = config.get("max_depth", app_state.max_depth)
-        new_repos = scanner_mod.scan_roots(
-            app_state.roots,
-            min_depth=app_state.min_depth,
-            max_depth=app_state.max_depth,
-        )
-        app_state.repos = new_repos
-        # The snapshot describes the old repo set — invalidate it so the next
-        # /api/repos recomputes fresh statuses for the new set (the refresher
-        # repopulates it on its next tick).
-        app_state.repo_status = {}
-        return app_state.roots, new_repos
+        _request_rescan(app_state)
 
     # ------------------------------------------------------------------
     # Dispatch

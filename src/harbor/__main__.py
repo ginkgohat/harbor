@@ -342,6 +342,10 @@ def _run_server(args: argparse.Namespace) -> int:
         # Remember whether depth was set via CLI so hot-reload doesn't override it.
         cli_min_depth=args.min_depth,
         cli_max_depth=args.max_depth,
+        # The startup scan above is the first completed scan; the frontend
+        # waits for scan_generation to advance after kicking a background
+        # rescan (X-Harbor-Scan-Gen header).
+        scan_generation=1,
     )
     # Share state with the server module (read by every Handler instance).
     server_mod.app_state = state

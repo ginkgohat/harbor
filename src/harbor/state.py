@@ -45,6 +45,12 @@ class HarborApp:
         repo_status: Cached repo status snapshot (path → status dict), kept
             fresh in the background so /api/repos never blocks on git.
         refresher: The daemon thread running the refresh loop, if started.
+        scan_generation: Count of completed scans (frontend waits on it after
+            kicking a background rescan via the X-Harbor-Scan-Gen header).
+        rescanning: True while a background rescan worker is running.
+        rescan_requested: True when a mutation asked for a rescan while one
+            was already running (worker re-runs instead of missing it).
+        rescan_lock: Guards ``rescanning``/``rescan_requested``.
     """
 
     # --- configuration / repo state ---
@@ -79,3 +85,15 @@ class HarborApp:
     repo_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     # The daemon thread running the refresh loop (None until started).
     refresher: threading.Thread | None = None
+
+    # --- background rescan ---
+    # Count of completed scans; /api/repos reports it via the
+    # X-Harbor-Scan-Gen header so the frontend can wait for a background
+    # rescan to finish.  Incremented by server._rescan_worker.
+    scan_generation: int = 0
+    # Single-flight guard for background rescans: True while a worker runs;
+    # rescan_requested makes the worker loop once more instead of missing a
+    # mutation that arrived mid-scan.
+    rescanning: bool = False
+    rescan_requested: bool = False
+    rescan_lock: threading.Lock = field(default_factory=threading.Lock)

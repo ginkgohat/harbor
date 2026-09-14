@@ -154,7 +154,7 @@ def test_mutating_request_rejects_non_loopback_host(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# do_POST /api/rescan returns the documented shape
+# do_POST /api/rescan kicks a background scan and returns immediately
 # ---------------------------------------------------------------------------
 
 
@@ -168,15 +168,7 @@ def test_post_rescan_returns_shape(tmp_path):
     status, body = _read_response(h)
     assert status == 200
     assert body["ok"] is True
-    assert "roots" in body
-    assert "count" in body
-    assert "min_depth" in body
-    assert "max_depth" in body
-    # roots is a list of {path, label} dicts
-    assert isinstance(body["roots"], list)
-    for r in body["roots"]:
-        assert "path" in r
-        assert "label" in r
+    assert body["pending"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1218,18 +1210,34 @@ def test_get_repos_falls_back_to_live_when_snapshot_empty():
     assert server.app_state.repo_status == {"fake": live[0]}
 
 
-def test_rescan_invalidates_snapshot(tmp_path):
-    """After a rescan swaps repos, the old status snapshot is dropped."""
+def test_rescan_runs_in_background_and_bumps_generation(tmp_path):
+    """POST /api/rescan returns immediately; the scan runs in the background.
+
+    The worker swaps repos, pre-computes a fresh status snapshot, and bumps
+    scan_generation (reported via the X-Harbor-Scan-Gen header) when done.
+    """
     server.app_state.config_path = str(tmp_path / "config.toml")
-    server.app_state.roots = []
-    # Seed a stale snapshot from a previous repo set.
-    server.app_state.repo_status = {"stale": {"path": "stale", "dirty": True}}
+    server.app_state.roots = []  # empty tree → no repos
+    before = server.app_state.scan_generation
 
     h = _make_handler("POST", "/api/rescan", body=b"{}")
     h.do_POST()
     status, _ = _read_response(h)
     assert status == 200
+
+    deadline = time.time() + 5
+    while server.app_state.scan_generation <= before and time.time() < deadline:
+        time.sleep(0.05)
+    assert server.app_state.scan_generation == before + 1
+    assert server.app_state.repos == {}
     assert server.app_state.repo_status == {}
+
+    # /api/repos reports the completed-scan generation in a header.
+    h = _make_handler("GET", "/api/repos")
+    h.do_GET()
+    raw = h.wfile.getvalue()
+    head = raw.partition(b"\r\n\r\n")[0].decode("latin1")
+    assert f"X-Harbor-Scan-Gen: {before + 1}" in head
 
 
 def test_repo_action_updates_cached_snapshot(tmp_path):
