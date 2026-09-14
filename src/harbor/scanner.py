@@ -2,13 +2,35 @@
 
 import logging
 import os
+import time
+from typing import Any
 
 from . import git as git_ops
 
 logger = logging.getLogger(__name__)
 
+# Cross-scan memo of default-branch probes.  T-021 caches the probe on each
+# repo record within one scan; this extends it across rescans, because the
+# default branch essentially never changes and probing costs 1-6 git
+# subprocesses per repo — the dominant cost of a rescan on a large root tree.
+# A TTL bounds staleness (a rename or branch switch shows up within the
+# window).  Process-wide infrastructure (like git._EXECUTOR), not app state.
+_DEFAULT_BRANCH_TTL = 300.0  # seconds
+_DEFAULT_BRANCH_CACHE: dict[str, tuple[float, str | None]] = {}
 
-def _git_file_target_exists(git_file):
+
+def _cached_default_branch(path: str) -> str | None:
+    """Return the default branch for *path*, probing at most once per TTL."""
+    now = time.monotonic()
+    hit = _DEFAULT_BRANCH_CACHE.get(path)
+    if hit is not None and now - hit[0] < _DEFAULT_BRANCH_TTL:
+        return hit[1]
+    value = git_ops._default_branch(path)
+    _DEFAULT_BRANCH_CACHE[path] = (now, value)
+    return value
+
+
+def _git_file_target_exists(git_file: str) -> bool:
     """Validate a ``.git`` *file* (worktree / submodule pointer).
 
     Returns True only if the file holds a ``gitdir:`` line whose target
@@ -28,7 +50,9 @@ def _git_file_target_exists(git_file):
     return False
 
 
-def find_repos(root, min_depth=1, max_depth=5, label=None):
+def find_repos(
+    root: str, min_depth: int = 1, max_depth: int = 5, label: str | None = None
+) -> list[dict[str, Any]]:
     """Walk *root* and return every directory that contains a .git marker.
 
     The marker is either a ``.git`` subdirectory (normal repo) or a ``.git``
@@ -55,7 +79,7 @@ def find_repos(root, min_depth=1, max_depth=5, label=None):
     """
     root = os.path.realpath(os.path.expanduser(root))
     root_label = label or os.path.basename(root)
-    repos = []
+    repos: list[dict[str, Any]] = []
 
     for dirpath, dirnames, _filenames in os.walk(root):
         rel = os.path.relpath(dirpath, root)
@@ -85,7 +109,9 @@ def find_repos(root, min_depth=1, max_depth=5, label=None):
     return sorted(repos, key=lambda r: r["name"])
 
 
-def scan_roots(roots, min_depth=1, max_depth=5):
+def scan_roots(
+    roots: list[tuple[str, str]], min_depth: int = 1, max_depth: int = 5
+) -> dict[str, dict[str, Any]]:
     """Scan multiple roots and return a merged repo dict.
 
     Args:
@@ -99,7 +125,7 @@ def scan_roots(roots, min_depth=1, max_depth=5):
         ``name`` is the same.  Each value has ``name``, ``path``, and
         ``root_label``.
     """
-    all_repos = {}
+    all_repos: dict[str, dict[str, Any]] = {}
     for path, label in roots:
         for repo in find_repos(
             path, min_depth=min_depth, max_depth=max_depth, label=label
@@ -109,8 +135,10 @@ def scan_roots(roots, min_depth=1, max_depth=5):
             # (realpath collision), the first root wins — same as before.
             all_repos.setdefault(repo["path"], repo)
     # T-021: the default branch virtually never changes, so probe it once per
-    # scan instead of on every status refresh (saves 1-6 subprocesses per repo
-    # per refresh).  Computed after dedup so duplicate paths aren't probed twice.
+    # scan instead of on every status refresh — and _cached_default_branch
+    # memoizes the probe across scans (TTL-bounded), so a rescan of a known
+    # repo set costs only the directory walk, not 1-6 subprocesses per repo.
+    # Computed after dedup so duplicate paths aren't probed twice.
     for repo in all_repos.values():
-        repo["default_branch"] = git_ops._default_branch(repo["path"])
+        repo["default_branch"] = _cached_default_branch(repo["path"])
     return all_repos

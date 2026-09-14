@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import urllib.request
+from unittest.mock import patch
 from urllib.error import HTTPError
 
 import pytest
@@ -17,7 +18,7 @@ import pytest as _pytest
 
 from harbor import config as config_mod
 from harbor import server
-from harbor.state import AppState
+from harbor.state import HarborApp
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,21 +84,15 @@ def _read_response(handler):
 
 @pytest.fixture(autouse=True)
 def _fresh_app_state():
-    """Replace ``server.app_state`` with a clean :class:`AppState` per test.
+    """Replace ``server.app_state`` with a clean :class:`HarborApp` per test.
 
-    This eliminates the previous snapshot/restore pattern: each test gets
-    its own state object, so there is no risk of cross-test contamination
-    through class attributes.  Disables auth token checks by default so
-    individual tests don't have to supply tokens.
+    Every bit of mutable state (repos, roots, auth token, session secret, jobs,
+    login throttling) lives on the single app object, so replacing it wholesale
+    resets everything — no snapshot/restore dance.  Auth is disabled by default
+    so individual tests don't have to supply tokens.
     """
-    server.app_state = AppState()
-    saved_token = server.AUTH_TOKEN
-    saved_secret = server.SESSION_SECRET
-    server.AUTH_TOKEN = None
-    server.SESSION_SECRET = None
+    server.app_state = HarborApp()
     yield
-    server.AUTH_TOKEN = saved_token
-    server.SESSION_SECRET = saved_secret
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +153,8 @@ def test_mutating_request_rejects_non_loopback_host(tmp_path):
     assert "loopback" in body["error"].lower()
 
 
-
 # ---------------------------------------------------------------------------
-# do_POST /api/rescan returns the documented shape
+# do_POST /api/rescan kicks a background scan and returns immediately
 # ---------------------------------------------------------------------------
 
 
@@ -174,15 +168,7 @@ def test_post_rescan_returns_shape(tmp_path):
     status, body = _read_response(h)
     assert status == 200
     assert body["ok"] is True
-    assert "roots" in body
-    assert "count" in body
-    assert "min_depth" in body
-    assert "max_depth" in body
-    # roots is a list of {path, label} dicts
-    assert isinstance(body["roots"], list)
-    for r in body["roots"]:
-        assert "path" in r
-        assert "label" in r
+    assert body["pending"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -409,8 +395,8 @@ def test_get_requests_skip_origin_check(tmp_path):
 
 def _enable_auth():
     """Turn on session auth and return a fresh valid cookie for 127.0.0.1:8765."""
-    server.AUTH_TOKEN = "launch-123"
-    server.SESSION_SECRET = b"test-secret-16-bytes!!"
+    server.app_state.auth_token = "launch-123"
+    server.app_state.session_secret = b"test-secret-16-bytes!!"
     return server._new_session_cookie("127.0.0.1:8765")
 
 
@@ -552,6 +538,51 @@ def test_post_login_issues_cookie(tmp_path):
     assert "set-cookie: harbor_session=" in set_cookie
 
 
+def _post_login(token, host="127.0.0.1:8765"):
+    """POST /login with the given token and return (status, body)."""
+    h = _make_handler(
+        "POST",
+        "/login",
+        body=json.dumps({"token": token}).encode(),
+        headers={"Host": host, "Content-Type": "application/json"},
+    )
+    h.do_POST()
+    return _read_response(h)
+
+
+def test_login_rate_limits_repeated_failures(tmp_path):
+    """Too many consecutive failed /login attempts are throttled with 429."""
+    _enable_auth()
+    try:
+        server.app_state.login_failures.clear()
+        for i in range(server.LOGIN_MAX_FAILURES):
+            status, _ = _post_login("wrong")
+            assert status == 401, f"attempt {i + 1} should be 401, got {status}"
+        # Budget exhausted → the next attempt is refused outright.
+        status, body = _post_login("wrong")
+        assert status == 429
+        assert "too many" in body["error"].lower()
+    finally:
+        server.app_state.login_failures.clear()
+
+
+def test_login_success_resets_attempt_counter(tmp_path):
+    """A successful login clears prior failure history (no stale throttle)."""
+    _enable_auth()
+    try:
+        server.app_state.login_failures.clear()
+        status, _ = _post_login("wrong")
+        assert status == 401
+        status, body = _post_login("launch-123")
+        assert status == 200, f"login should succeed, got {status}: {body}"
+        # Counter reset → a fresh run of failures starts from zero again.
+        for _ in range(server.LOGIN_MAX_FAILURES):
+            assert _post_login("wrong")[0] == 401
+        assert _post_login("wrong")[0] == 429
+    finally:
+        server.app_state.login_failures.clear()
+
+
 def _read_response_head(handler):
     """Return (status_line, full_header_block) from a handler's wfile."""
     raw = handler.wfile.getvalue()
@@ -561,8 +592,8 @@ def _read_response_head(handler):
 
 def test_post_action_with_session_cookie(tmp_path):
     """POSTs authenticate via the session cookie (sent same-origin by browsers)."""
-    server.AUTH_TOKEN = "launch-123"
-    server.SESSION_SECRET = b"test-secret-16-bytes!!"
+    server.app_state.auth_token = "launch-123"
+    server.app_state.session_secret = b"test-secret-16-bytes!!"
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
     cookie = server._new_session_cookie("127.0.0.1:8765")
@@ -577,8 +608,8 @@ def test_post_action_with_session_cookie(tmp_path):
 
 def test_no_auth_token_means_no_auth_required(tmp_path):
     """When auth is fully disabled (None), requests pass without any credential."""
-    assert server.AUTH_TOKEN is None  # fixture default
-    assert server.SESSION_SECRET is None
+    assert server.app_state.auth_token is None  # fixture default
+    assert server.app_state.session_secret is None
     server.app_state.config_path = str(tmp_path / "config.toml")
     server.app_state.repos = {}
 
@@ -591,9 +622,9 @@ def test_no_auth_token_means_no_auth_required(tmp_path):
 
 def test_sse_stream_requires_session(tmp_path):
     """SSE stream endpoint also requires a valid session cookie."""
-    server.AUTH_TOKEN = "launch-123"
-    server.SESSION_SECRET = b"test-secret-16-bytes!!"
-    server.JOBS.clear()
+    server.app_state.auth_token = "launch-123"
+    server.app_state.session_secret = b"test-secret-16-bytes!!"
+    server.app_state.jobs.clear()
     h = _make_handler("GET", "/api/stream?job=nonexistent", body=b"")
     h.do_GET()
     status, _ = _read_response(h)
@@ -728,12 +759,26 @@ def test_pull_all_job_emits_done_on_clean_run():
     # The JOBS entry is owned by the SSE consumer — the worker emits the
     # "done" event, the consumer is the one that pops the entry.  We
     # verify the entry still exists; an SSE-driven test would also pop it.
-    assert job_id in server.JOBS
+    assert job_id in server.app_state.jobs
+
+
+def test_pull_all_job_queue_is_bounded():
+    """The pull-all SSE event queue has a finite maxsize (backpressure cap).
+
+    A bounded queue bounds memory even with a huge root tree and no SSE
+    consumer draining events; the bound is positive and finite."""
+    job_id = server.start_pull_all_job({})
+    try:
+        q = server.app_state.jobs[job_id]["queue"]
+        assert q.maxsize == server.MAX_SSE_QUEUE_EVENTS
+        assert q.maxsize > 0
+    finally:
+        server.app_state.jobs.pop(job_id, None)
 
 
 def _drain_queue(job_id, timeout=2.0):
     """Pull every event from a job's queue until done, with a timeout guard."""
-    q = server.JOBS[job_id]["queue"]
+    q = server.app_state.jobs[job_id]["queue"]
     seen = []
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -845,8 +890,8 @@ def test_cli_roots_not_persisted_to_config(tmp_path, monkeypatch):
 
 def test_stale_job_swept_when_new_job_starts(monkeypatch):
     """A job older than JOB_TTL_SECONDS is removed when a new job starts."""
-    server.JOBS.clear()
-    server.JOBS["old"] = {
+    server.app_state.jobs.clear()
+    server.app_state.jobs["old"] = {
         "queue": queue.Queue(),
         "created": time.monotonic() - server.JOB_TTL_SECONDS - 10,
     }
@@ -859,17 +904,17 @@ def test_stale_job_swept_when_new_job_starts(monkeypatch):
 
     job_id = server.start_pull_all_job({"/fake": {"name": "fake", "path": "/fake"}})
     # Old job should have been swept
-    assert "old" not in server.JOBS
+    assert "old" not in server.app_state.jobs
     # New job is present
-    assert job_id in server.JOBS
+    assert job_id in server.app_state.jobs
     # Clean up
-    server.JOBS.pop(job_id, None)
+    server.app_state.jobs.pop(job_id, None)
 
 
 def test_fresh_job_survives_sweep(monkeypatch):
     """A recently-created job survives the lazy sweep."""
-    server.JOBS.clear()
-    server.JOBS["fresh"] = {"queue": queue.Queue(), "created": time.monotonic() - 10}
+    server.app_state.jobs.clear()
+    server.app_state.jobs["fresh"] = {"queue": queue.Queue(), "created": time.monotonic() - 10}
 
     def noop_pull(repo, q):
         q.put({"done": True})
@@ -878,15 +923,15 @@ def test_fresh_job_survives_sweep(monkeypatch):
     monkeypatch.setattr(server, "ThreadPoolExecutor", _MockExecutor)
 
     job_id = server.start_pull_all_job({"/fake": {"name": "fake", "path": "/fake"}})
-    assert "fresh" in server.JOBS
+    assert "fresh" in server.app_state.jobs
     # Clean up
-    server.JOBS.pop(job_id, None)
-    server.JOBS.pop("fresh", None)
+    server.app_state.jobs.pop(job_id, None)
+    server.app_state.jobs.pop("fresh", None)
 
 
 def test_job_records_created_timestamp(monkeypatch):
     """Every new job gets a 'created' monotonic timestamp."""
-    server.JOBS.clear()
+    server.app_state.jobs.clear()
 
     def noop_pull(repo, q):
         q.put({"done": True})
@@ -898,11 +943,11 @@ def test_job_records_created_timestamp(monkeypatch):
     job_id = server.start_pull_all_job({"/fake": {"name": "fake", "path": "/fake"}})
     after = time.monotonic()
 
-    job = server.JOBS[job_id]
+    job = server.app_state.jobs[job_id]
     assert "created" in job
     assert before <= job["created"] <= after
     # Clean up
-    server.JOBS.pop(job_id, None)
+    server.app_state.jobs.pop(job_id, None)
 
 
 class _MockExecutor:
@@ -1018,7 +1063,7 @@ def _read_sse_events(base_url, job_id, max_events=100, timeout=3):
 
 def test_sse_stream_emits_done_and_job_is_cleaned_up(monkeypatch, tmp_path):
     """Normal path: 'done' event arrives, JOBS entry is removed."""
-    server.JOBS.clear()
+    server.app_state.jobs.clear()
     base_url, srv = _start_real_server(monkeypatch, tmp_path)
     try:
         req = urllib.request.Request(
@@ -1030,7 +1075,7 @@ def test_sse_stream_emits_done_and_job_is_cleaned_up(monkeypatch, tmp_path):
         with urllib.request.urlopen(req, timeout=3) as resp:
             body = json.loads(resp.read())
         job_id = body["job_id"]
-        assert job_id in server.JOBS
+        assert job_id in server.app_state.jobs
 
         events = _read_sse_events(base_url, job_id, timeout=3)
         assert len(events) >= 1
@@ -1039,9 +1084,9 @@ def test_sse_stream_emits_done_and_job_is_cleaned_up(monkeypatch, tmp_path):
         # Job cleanup happens in the handler thread after writing the done
         # event — wait briefly for it to be removed (avoids flaky races).
         deadline = time.time() + 2
-        while job_id in server.JOBS and time.time() < deadline:
+        while job_id in server.app_state.jobs and time.time() < deadline:
             time.sleep(0.01)
-        assert job_id not in server.JOBS
+        assert job_id not in server.app_state.jobs
     finally:
         srv.shutdown()
 
@@ -1059,13 +1104,13 @@ def test_sse_stream_404_for_unknown_job(monkeypatch, tmp_path):
 
 def test_sse_client_disconnect_leaves_job_for_sweep(monkeypatch, tmp_path):
     """Client disconnects before 'done' — job stays until TTL sweep cleans it."""
-    server.JOBS.clear()
+    server.app_state.jobs.clear()
     base_url, srv = _start_real_server(monkeypatch, tmp_path)
     try:
         slow_q = queue.Queue()
         slow_job_id = "slow-test-job"
-        with server.JOBS_LOCK:
-            server.JOBS[slow_job_id] = {"queue": slow_q, "created": time.monotonic()}
+        with server.app_state.jobs_lock:
+            server.app_state.jobs[slow_job_id] = {"queue": slow_q, "created": time.monotonic()}
 
         slow_q.put({"repo": "test", "status": "running"})
         # Connect via raw socket, read one event, then close abruptly
@@ -1090,14 +1135,152 @@ def test_sse_client_disconnect_leaves_job_for_sweep(monkeypatch, tmp_path):
 
         # Give the server thread a moment to notice the disconnect
         time.sleep(0.2)
-        assert slow_job_id in server.JOBS
+        assert slow_job_id in server.app_state.jobs
 
         # Simulate TTL expiry — sweep should clean it
-        with server.JOBS_LOCK:
-            server.JOBS[slow_job_id]["created"] = (
+        with server.app_state.jobs_lock:
+            server.app_state.jobs[slow_job_id]["created"] = (
                 time.monotonic() - server.JOB_TTL_SECONDS - 100
             )
         server._sweep_stale_jobs()
-        assert slow_job_id not in server.JOBS
+        assert slow_job_id not in server.app_state.jobs
     finally:
         srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Perf#1 — cached status snapshot (background refresh)
+# ---------------------------------------------------------------------------
+
+
+def test_get_repos_serves_cached_snapshot():
+    """With a snapshot present, /api/repos serves it without recomputing."""
+    server.app_state.repos = {"fake": {"name": "fake", "path": "fake"}}
+    cached = [
+        {
+            "name": "fake",
+            "path": "fake",
+            "branch": "main",
+            "dirty": False,
+            "detached": False,
+            "is_main": True,
+            "ahead": None,
+            "behind": None,
+            "root_label": "",
+        }
+    ]
+    server.app_state.repo_status = {"fake": cached[0]}
+
+    with patch(
+        "harbor.server.git_ops.get_repos_status",
+        side_effect=AssertionError("must not recompute"),
+    ) as recompute:
+        h = _make_handler("GET", "/api/repos")
+        h.do_GET()
+        status, body = _read_response(h)
+    assert status == 200
+    assert body == cached
+    recompute.assert_not_called()
+
+
+def test_get_repos_falls_back_to_live_when_snapshot_empty():
+    """Empty snapshot + non-empty repos → compute on demand and cache it."""
+    server.app_state.repos = {"fake": {"name": "fake", "path": "fake"}}
+    live = [
+        {
+            "name": "fake",
+            "path": "fake",
+            "branch": "main",
+            "dirty": False,
+            "detached": False,
+            "is_main": True,
+            "ahead": None,
+            "behind": None,
+            "root_label": "",
+        }
+    ]
+
+    with patch("harbor.server.git_ops.get_repos_status", return_value=live) as m:
+        h = _make_handler("GET", "/api/repos")
+        h.do_GET()
+        status, body = _read_response(h)
+    assert status == 200
+    assert body == live
+    m.assert_called_once()
+    assert server.app_state.repo_status == {"fake": live[0]}
+
+
+def test_rescan_runs_in_background_and_bumps_generation(tmp_path):
+    """POST /api/rescan returns immediately; the scan runs in the background.
+
+    The worker swaps repos, pre-computes a fresh status snapshot, and bumps
+    scan_generation (reported via the X-Harbor-Scan-Gen header) when done.
+    """
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.roots = []  # empty tree → no repos
+    before = server.app_state.scan_generation
+
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    status, _ = _read_response(h)
+    assert status == 200
+
+    deadline = time.time() + 5
+    while server.app_state.scan_generation <= before and time.time() < deadline:
+        time.sleep(0.05)
+    assert server.app_state.scan_generation == before + 1
+    assert server.app_state.repos == {}
+    assert server.app_state.repo_status == {}
+
+    # /api/repos reports the completed-scan generation in a header.
+    h = _make_handler("GET", "/api/repos")
+    h.do_GET()
+    raw = h.wfile.getvalue()
+    head = raw.partition(b"\r\n\r\n")[0].decode("latin1")
+    assert f"X-Harbor-Scan-Gen: {before + 1}" in head
+
+
+def test_repo_action_updates_cached_snapshot(tmp_path):
+    """After a successful action, the snapshot entry is refreshed, not stale."""
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {"fake": {"name": "fake", "path": "fake"}}
+    server.app_state.repo_status = {
+        "fake": {"name": "fake", "path": "fake", "dirty": True}
+    }
+    fresh = {"name": "fake", "path": "fake", "dirty": False}
+    outcome = server.git_ops.ActionOutcome(ok=True, output="ok")
+
+    with patch("harbor.server.git_ops.do_action", return_value=outcome), patch(
+        "harbor.server.git_ops.repo_status", return_value=fresh
+    ):
+        h = _make_handler(
+            "POST", "/api/repo/fake/action", body=b'{"action":"pull"}'
+        )
+        h.do_POST()
+        status, body = _read_response(h)
+    assert status == 200
+    assert body["status"] == fresh
+    assert server.app_state.repo_status["fake"] == fresh
+
+
+def test_refresh_once_populates_snapshot():
+    """_refresh_once computes and caches statuses for the current repo set."""
+    app = HarborApp()
+    app.repos = {"fake": {"name": "fake", "path": "fake"}}
+    live = [{"name": "fake", "path": "fake", "dirty": False}]
+    with patch("harbor.server.git_ops.get_repos_status", return_value=live):
+        server._refresh_once(app)
+    assert app.repo_status == {"fake": live[0]}
+
+
+def test_refresh_once_discards_snapshot_when_repos_rebound():
+    """If repos is rebound mid-compute, the computed snapshot is discarded."""
+    app = HarborApp()
+    app.repos = {"old": {"name": "old", "path": "old"}}
+
+    def _rebind(repos):
+        app.repos = {"new": {"name": "new", "path": "new"}}
+
+    with patch("harbor.server.git_ops.get_repos_status", side_effect=_rebind):
+        server._refresh_once(app)
+    assert app.repo_status == {}

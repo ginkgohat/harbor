@@ -47,10 +47,28 @@ this repository. It does **not** cover:
 Harbor is designed as a **local-only** tool:
 
 - Binds to `127.0.0.1` by default — not reachable from the network
-- No built-in authentication — anyone with local shell access can use it
-- Cross-origin POST requests are rejected via Origin/Referer checks
+- Optional launch-token authentication.  When started with a token, the
+  browser exchanges the **one-time launch token** (`/?token=...`) for a signed,
+  HttpOnly session cookie (`harbor_session`).  The launch token is accepted
+  **only** for that single exchange — it is never accepted by API/SSE routes,
+  and it leaves the address bar and browser history immediately after the
+  redirect.  Run without a token for a trusted local-only setup (anyone with
+  local shell access can use it).  Choosing token-only auth over a cookie is a
+  deliberate tradeoff: putting a credential in the URL leaks it into logs and
+  history, so the credential moves to a cookie as soon as the browser can take
+  ownership of it.
+- Cross-origin mutation requests are rejected via Origin/Referer checks, and the
+  HTTP `Host` header must name a loopback endpoint regardless of auth.  Requiring
+  a loopback `Host` name (`127.0.0.1`, `localhost`, `[::1]`) is the defense
+  against **DNS rebinding**: a malicious domain that resolves to 127.0.0.1 would
+  still present a non-loopback `Host` (its own name) and is rejected rather than
+  trusted.  (Attacker-domain `Host` + matching `Origin` is exercised by
+  `test_mutating_request_rejects_non_loopback_host`.)
 - Destructive operations (discard, checkout, stash drop) require UI
-  confirmation
+  confirmation.  `discard` is **recoverable**: it runs `git stash push -u`
+  (tagged `harbor:discard <timestamp>`) instead of destroying changes, so the
+  previous state can be restored with `git stash apply`.  Login attempts are
+  rate-limited to slow brute-forcing of the launch token.
 
 Harbor is **not** intended to be exposed to untrusted networks. If you
 reverse-proxy or port-forward it, you assume all risk. See the

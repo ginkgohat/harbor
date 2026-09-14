@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -34,7 +35,7 @@ _LEGACY_CONFIG_PATH = _LEGACY_CONFIG_DIR / "config.toml"
 _KNOWN_KEYS = {"port", "min_depth", "max_depth", "roots"}
 
 
-def load_config(path):
+def load_config(path: str | Path) -> dict[str, Any] | None:
     """Load a TOML config file, returning a dict or None.
 
     If *path* is the default CONFIG_PATH and the file doesn't exist, we
@@ -62,7 +63,7 @@ def load_config(path):
         return None
 
 
-def migrate_legacy_config():
+def migrate_legacy_config() -> None:
     """Migrate the legacy ~/.config/harbor config to the platformdirs path.
 
     The old file is kept as ``config.toml.bak`` in the legacy directory
@@ -80,7 +81,7 @@ def migrate_legacy_config():
     logger.info("Config migrated to %s", CONFIG_PATH)
 
 
-def save_config(path, config):
+def save_config(path: str | Path, config: dict[str, Any]) -> None:
     """Write a config dict to a TOML file using tomli_w.
 
     Only the keys Harbor knows about (port, min_depth, max_depth, roots)
@@ -102,7 +103,7 @@ def save_config(path, config):
 
     # Build a clean dict with only recognized keys, preserving the order
     # that makes the config file readable (scalars first, then roots table).
-    clean: dict = {}
+    clean: dict[str, Any] = {}
     for key in ("port", "min_depth", "max_depth"):
         if key in config:
             clean[key] = config[key]
@@ -116,7 +117,9 @@ def save_config(path, config):
         tomli_w.dump(clean, f)
 
 
-def resolve_roots(cli_paths, config):
+def resolve_roots(
+    cli_paths: list[str], config: dict[str, Any] | None
+) -> list[tuple[str, str]]:
     """Resolve the list of (path, label) roots from CLI args.
 
     - If CLI paths are given, use them.
@@ -149,7 +152,13 @@ def resolve_roots(cli_paths, config):
     return [(os.getcwd(), os.path.basename(os.getcwd()))]
 
 
-def resolve_setting(cli_val, env_var, config_key, config, default):
+def resolve_setting(
+    cli_val: Any,
+    env_var: str,
+    config_key: str,
+    config: dict[str, Any] | None,
+    default: Any,
+) -> Any:
     """Resolve a setting: CLI > env > config file > default."""
     if cli_val is not None:
         return cli_val
@@ -160,7 +169,16 @@ def resolve_setting(cli_val, env_var, config_key, config, default):
     return default
 
 
-def resolve_int_setting(cli_val, env_var, config_key, config, default, lo, hi, name):
+def resolve_int_setting(
+    cli_val: Any,
+    env_var: str,
+    config_key: str,
+    config: dict[str, Any] | None,
+    default: int,
+    lo: int,
+    hi: int,
+    name: str,
+) -> int:
     """Resolve an integer setting and validate it against ``[lo, hi]``.
 
     Like :func:`resolve_setting`, but also converts the env-string to ``int``

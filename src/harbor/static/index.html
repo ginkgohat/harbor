@@ -428,10 +428,10 @@ body.term-open main { padding-bottom: 260px; }
     background: var(--diff-bg);
   }
   #diffBody .d-line { padding: 0 18px; white-space: pre-wrap; word-break: break-all; }
-  #diffBody .d-add { background: var(--success-soft); color: var(--success); }
-  #diffBody .d-del { background: var(--danger-soft); color: var(--danger); }
   #diffBody .d-hunk { color: var(--accent); font-weight: 600; margin-top: 6px; }
-  #diffBody .d-meta { color: var(--faint); }
+  #diffBody .d-pre { margin: 0; padding: 8px 18px; white-space: pre; overflow-x: auto;
+    tab-size: 4; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text); }
   #diffBody .d-empty { color: var(--muted); text-align: center; padding: 40px 0; }
 
   /* ---------- terminal drawer ---------- */
@@ -1154,21 +1154,44 @@ setTimeout(_initSyncedStripA11y, 100);
 
 
 /* ---------- refresh / rescan ---------- */
+// Scan generation seen in the most recent /api/repos response.  A background
+// rescan bumps it server-side; waitForScan() polls until it advances so the
+// UI updates only after the new repo set is actually published.
+let lastScanGen = 0;
+
+async function waitForScan(beforeGen, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250));
+    const res = await fetch(`/api/repos`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) continue;
+    const gen = parseInt(res.headers.get("X-Harbor-Scan-Gen") || "0", 10);
+    if (!Number.isNaN(gen) && gen > beforeGen) {
+      repos = await res.json();
+      lastScanGen = gen;
+      render();
+      return repos.length;
+    }
+  }
+  return null; // timed out — caller falls back to loadRepos()
+}
+
 $("#refreshBtn").addEventListener("click", async () => {
   const btn = $("#refreshBtn");
   btn.disabled = true;
   btn.style.opacity = "0.5";
   try {
-    const res = await fetch(`/api/rescan`, { method: "POST", signal: AbortSignal.timeout(30000) });
-    const data = await res.json();
-    if (data.ok) {
-      await loadRepos();
-      // Briefly show refresh confirmation in stats
-      const stats = $("#stats");
-      const original = stats.innerHTML;
-      stats.innerHTML = t("refreshDone", data.count);
-      setTimeout(() => { stats.innerHTML = original; render(); }, 1500);
-    }
+    const before = lastScanGen;
+    const res = await fetch(`/api/rescan`, { method: "POST", signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Rescan runs in the background — wait until it actually finished.
+    let n = await waitForScan(before, 15000);
+    if (n === null) { await loadRepos(); n = repos.length; }
+    // Briefly show refresh confirmation in stats
+    const stats = $("#stats");
+    const original = stats.innerHTML;
+    stats.innerHTML = t("refreshDone", n);
+    setTimeout(() => { stats.innerHTML = original; render(); }, 1500);
   } catch (err) {
     console.error("rescan failed:", err);
   } finally {
@@ -1216,6 +1239,8 @@ async function loadRepos() {
       return;
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const gen = parseInt(res.headers.get("X-Harbor-Scan-Gen") || "0", 10);
+    if (!Number.isNaN(gen)) lastScanGen = gen;
     repos = await res.json();
     render();
   } catch (err) {
@@ -1552,19 +1577,7 @@ document.addEventListener("click", async (e) => {
 // (The server additionally truncates the payload itself — T-041.)
 const MAX_DIFF_LINES = 5000;
 
-function diffLineClass(line) {
-  if (line.startsWith("diff --git") || line.startsWith("index ")) return "d-meta";
-  if (line.startsWith("+++") || line.startsWith("---")) return "d-meta";
-  if (line.startsWith("@@")) { diffLineClass._inHunk = true; return "d-hunk"; }
-  if (diffLineClass._inHunk) {
-    if (line.startsWith("+")) return "d-add";
-    if (line.startsWith("-")) return "d-del";
-  }
-  return "";
-}
-
 async function openDiff(name, path) {
-  diffLineClass._inHunk = false;
   $("#diffTitle").textContent = name;
   $("#diffSub").textContent = t("diffLoading");
   $("#diffUntracked").classList.remove("show");
@@ -1598,8 +1611,15 @@ async function openDiff(name, path) {
   if (data.truncated) notices.push(t("diffTruncated"));
   if (tooMany) notices.push(t("diffTooManyLines", MAX_DIFF_LINES));
   const noticeHtml = notices.map(n => `<div class="d-line d-hunk">${escHTML(n)}</div>`).join("");
-  $("#diffBody").innerHTML = noticeHtml + lines.map(line =>
-    `<div class="d-line ${diffLineClass(line)}">${escHTML(line) || "&nbsp;"}</div>`).join("");
+  // Cheap large-diff render: a single <pre> written once via textContent — one
+  // DOM text node instead of up to 5000 line-<div>s, so a big diff no longer
+  // blocks layout with one long innerHTML insert.  This trades per-line +/−
+  // coloring for speed; the changed-line count stays in the dialog subtitle.
+  const pre = document.createElement("pre");
+  pre.className = "d-pre";
+  pre.textContent = lines.join("\n");
+  $("#diffBody").innerHTML = noticeHtml;
+  $("#diffBody").appendChild(pre);
 }
 
 $("#diffClose").addEventListener("click", () => $("#diffOverlay").classList.remove("show"));
@@ -1619,6 +1639,11 @@ async function runAction(name, path, action) {
 }
 
 async function bulkRun(action, repoList) {
+  const batchBox = $("#batchActions");
+  const buttons = batchBox ? [...batchBox.querySelectorAll("button")] : [];
+  // Pending indicator: disable the batch controls for the duration of the run
+  // so they visibly reflect the in-progress state and can't be re-triggered.
+  buttons.forEach(b => b.disabled = true);
   $("#terminal").classList.add("open");
   document.body.classList.add("term-open");
   const total = repoList.length;
@@ -1633,7 +1658,11 @@ async function bulkRun(action, repoList) {
       termLine(`<span class="d">·</span> ${done}/${total} done`);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+  } finally {
+    buttons.forEach(b => b.disabled = false);
+  }
 }
 
 async function singlePull(name, path, btn) {
@@ -1689,9 +1718,12 @@ $("#settingsRoots").addEventListener("click", async (e) => {
   const btn = e.target.closest(".del-btn");
   if (!btn) return;
   // Match by path (B-3) — the contract is symmetric with POST /api/roots.
+  const before = lastScanGen;
   await fetch(`/api/roots/${encodeURIComponent(btn.dataset.path)}`, { method: "DELETE" });
   await renderSettingsRoots();
-  await loadRepos();
+  // The rescan runs in the background — wait for it so the grid reflects the
+  // removed root (the roots list above is already updated synchronously).
+  if (await waitForScan(before, 15000) === null) await loadRepos();
 });
 
 const BROWSE_QUICK = [{ name: "Home", path: "~" }, { name: "/", path: "/" }];
@@ -1752,13 +1784,16 @@ $("#browseList").addEventListener("click", async (e) => {
 });
 
 async function addRoot(path, label) {
+  const before = lastScanGen;
   const res = await fetch(`/api/roots`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, label }),
   });
   if (res.ok) {
     await renderSettingsRoots();
-    await loadRepos();
+    // The rescan runs in the background — wait for it so the grid shows the
+    // newly discovered repos before the user closes settings.
+    if (await waitForScan(before, 15000) === null) await loadRepos();
   }
 }
 

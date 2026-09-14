@@ -37,7 +37,7 @@ jobs:
       - name: Install linter
         run: |
           python -m pip install --upgrade pip
-          pip install ruff
+          pip install ruff mypy
 
       - name: Ruff check
         run: make lint PYTHON=python
@@ -124,29 +124,33 @@ jobs:
   # E2E browser tests — one Linux + one Python version is enough.  They
   # exercise real browser behavior (login, batch actions, discard) rather than
   # Python-version/OS portability, which the `test` matrix already covers.
+  #
+  # Runs inside the official Playwright Python image: Python 3.12 + Chromium +
+  # every system library baked in, so no apt installs and no browser download
+  # are needed.  The tag MUST stay in sync with the pinned `playwright` version
+  # in pyproject.toml (both v1.62.0) — on a mismatch `playwright install` would
+  # silently re-download the browser and the image's cache is wasted.
   e2e:
     name: E2E (browser)
     needs: [lint]
     runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.62.0-noble
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
+      # The image has no `make`, so these inline the Makefile recipes they
+      # mirror (make dev / make e2e-setup / make test-e2e) to keep the job
+      # apt-free.  The image Python is system-wide and not PEP 668-managed,
+      # so a plain editable install works.
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          make dev PYTHON=python
+        run: python -m pip install -e ".[dev]"
 
-      # Install Chromium plus the OS libraries it needs on the GitHub runner
-      # (`make e2e-setup` installs the browser binary but not the apt system
-      # deps that `--with-deps` sets up).
-      - name: Install Playwright Chromium
-        run: python -m playwright install --with-deps chromium
+      # Browsers ship in the image (PLAYWRIGHT_BROWSERS_PATH=/ms-playwright),
+      # so this is a fast no-op that only downloads if versions ever drift.
+      - name: Verify Playwright Chromium
+        run: python -m playwright install chromium
 
       - name: Run e2e tests
-        run: make test-e2e PYTHON=python
+        run: PYTHONPATH=src python -m pytest tests/e2e/ -m e2e --browser chromium

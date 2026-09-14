@@ -10,6 +10,7 @@ on macOS, ``%LOCALAPPDATA%/harbor`` on Windows).
 
 from __future__ import annotations
 
+import argparse
 import errno
 import os
 import signal
@@ -17,6 +18,8 @@ import sys
 import time
 from contextlib import suppress
 from pathlib import Path
+from types import FrameType
+from typing import NoReturn
 
 from platformdirs import user_state_dir
 
@@ -94,7 +97,7 @@ def _pid_start_time(pid: int) -> float | None:
     return None
 
 
-def cmd_start(serve_args) -> int:
+def cmd_start(serve_args: argparse.Namespace) -> int:
     """Start Harbor in the background.
 
     *serve_args* is the argparse namespace for the ``start`` subcommand
@@ -176,7 +179,7 @@ def cmd_start(serve_args) -> int:
     atexit.register(_remove_pid)
 
     # Handle SIGTERM gracefully.
-    def _handle_sigterm(signum, frame):
+    def _handle_sigterm(signum: int, frame: FrameType | None) -> NoReturn:
         # Raise SystemExit so atexit runs and the server shuts down cleanly.
         raise SystemExit(0)
 

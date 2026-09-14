@@ -3,6 +3,7 @@
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -272,6 +273,52 @@ def test_scan_roots_caches_default_branch(tmp_path):
     for repo in repos.values():
         assert "default_branch" in repo
         assert repo["default_branch"] == "main"
+
+
+def test_scan_roots_reuses_cached_default_branch(tmp_path):
+    """A second scan of the same repos doesn't re-probe default branches.
+
+    The cross-scan probe cache (scanner._DEFAULT_BRANCH_CACHE) is what makes
+    a rescan cheap — the 1-6 subprocess per-repo probe is the dominant cost.
+    """
+    from harbor import scanner as scanner_mod
+
+    d = tmp_path / "work"
+    init_repo(d / "project-a")
+    init_repo(d / "project-b")
+    with patch(
+        "harbor.scanner.git_ops._default_branch",
+        wraps=scanner_mod.git_ops._default_branch,
+    ) as probe:
+        scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+        first_calls = probe.call_count
+        assert first_calls >= 1
+        scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+        assert probe.call_count == first_calls  # served from cache
+
+
+def test_default_branch_cache_reprobes_after_ttl(tmp_path):
+    """Expired cache entries are re-probed on the next scan."""
+    from harbor import scanner as scanner_mod
+
+    d = tmp_path / "work"
+    init_repo(d / "project-a")
+    with patch(
+        "harbor.scanner.git_ops._default_branch",
+        wraps=scanner_mod.git_ops._default_branch,
+    ) as probe:
+        scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+        first_calls = probe.call_count
+        # Age every cached entry past the TTL, then re-scan.  Entries are
+        # timestamped with time.monotonic(), whose zero point is arbitrary
+        # (e.g. time since boot) — not epoch time — so backdate relative to
+        # the TTL instead of hardcoding 0.0, which some CI runners have not
+        # been "up" long enough to still register as expired.
+        expired_at = time.monotonic() - scanner_mod._DEFAULT_BRANCH_TTL - 1
+        for key in list(scanner_mod._DEFAULT_BRANCH_CACHE):
+            scanner_mod._DEFAULT_BRANCH_CACHE[key] = (expired_at, "main")
+        scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+        assert probe.call_count > first_calls
 
 
 def test_repo_status_uses_cached_default_branch(tmp_path):
@@ -807,30 +854,38 @@ def test_create_server_success():
 
 
 # ---------------------------------------------------------------------------
-# T-030 — AppState dataclass
+# T-030 — HarborApp dataclass
 # ---------------------------------------------------------------------------
 
 
 def test_app_state_defaults():
-    from harbor.state import AppState
+    from harbor.state import HarborApp
 
-    state = AppState()
+    state = HarborApp()
     assert state.repos == {}
     assert state.config_path == ""
     assert state.min_depth == 1
     assert state.max_depth == 5
     assert state.cli_min_depth is None
     assert state.cli_max_depth is None
+    assert state.auth_token is None
+    assert state.session_secret is None
+    assert state.jobs == {}
+    assert state.login_failures == {}
 
 
 def test_app_state_is_independent():
-    """Two AppState instances don't share mutable defaults."""
-    from harbor.state import AppState
+    """Two HarborApp instances don't share mutable defaults."""
+    from harbor.state import HarborApp
 
-    a = AppState()
-    b = AppState()
+    a = HarborApp()
+    b = HarborApp()
     a.repos["/x"] = {"name": "x"}
+    a.jobs["j"] = {"queue": object(), "created": 0.0}
+    a.login_failures["127.0.0.1"] = [1.0]
     assert b.repos == {}
+    assert b.jobs == {}
+    assert b.login_failures == {}
 
 
 # ---------------------------------------------------------------------------

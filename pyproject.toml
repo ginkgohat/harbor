@@ -41,7 +41,12 @@ dev = [
     "mypy",
     "pre-commit",
     "hypothesis>=6.168.0",
-    "pytest-playwright>=0.9.0",
+    # Pinned so the CI e2e job can use the official Playwright Python image
+    # (mcr.microsoft.com/playwright/python:<same version>) whose Chromium is
+    # pre-installed — `playwright install` then becomes a no-op.  On a mismatch
+    # the browser would just be re-downloaded, so keep both in sync.
+    "playwright==1.62.0",
+    "pytest-playwright==0.9.0",
 ]
 
 [build-system]
@@ -103,12 +108,9 @@ split-on-trailing-comma = false
 python_version = "3.12"
 files = ["src/harbor"]
 ignore_missing_imports = true
-strict = false
-warn_unused_ignores = false
-warn_return_any = false
-disallow_untyped_defs = false
-check_untyped_defs = false
-# Progressive type-checking: start permissive, tighten over time as coverage improves.
+# Full strict mode: the package is now fully annotated and passes cleanly.
+# See Makefile `lint` (mypy runs without the old informational-only fallback).
+strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

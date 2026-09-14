@@ -39,8 +39,11 @@ dev:  ## Install in development mode with dev extras (requires pip)
 
 e2e-setup:  ## Install the Chromium build Playwright drives (pip can't manage it)
 	@# Idempotent and offline once installed (~0.5s), so test-e2e depends on it:
-	@# `make dev` alone leaves the browser missing and the e2e run fails.
-	$(PYTHON) -m playwright install chromium
+	@# `make dev` alone leaves the browser missing and the e2e run fails.  The
+	@# --with-deps flag installs the system libraries Chromium links against on
+	@# bare-metal Linux.  (CI no longer uses this target — the e2e job runs in
+	@# the official Playwright Python image, which ships the browser + deps.)
+	$(PYTHON) -m playwright install --with-deps chromium
 
 # ---------------------------------------------------------------------------
 # Run
@@ -93,8 +96,8 @@ coverage-html:  ## Run tests and generate HTML coverage report in htmlcov/ (excl
 
 lint:  ## Run lint checks (ruff + mypy)
 	$(PYTHON) -m ruff check src/ tests/
-	@# mypy only checks src/ (progressive, not required to pass yet — informational)
-	-$(PYTHON) -m mypy src/ 2>/dev/null || echo 'mypy: skipped (not installed or informational only)'
+	@# mypy checks src/ with strict mode enabled (see [tool.mypy] in pyproject.toml)
+	$(PYTHON) -m mypy src/
 
 format:  ## Auto-fix lint findings and format (same pair as the pre-commit hooks)
 	$(PYTHON) -m ruff check --fix src/ tests/

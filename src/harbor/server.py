@@ -15,40 +15,30 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import parse_qs, unquote, urlparse
+from typing import Any, TypedDict
+from urllib.parse import ParseResult, parse_qs, unquote, urlparse
 
 from . import config as config_mod
 from . import git as git_ops
 from . import scanner as scanner_mod
-from .state import AppState
+from .state import HarborApp
 
 logger = logging.getLogger(__name__)
 
-# Module-level application state — populated by __main__ at startup.
-# Tests can also set this directly to avoid touching class attributes.
-app_state: AppState = AppState()
 
-JOBS_LOCK = threading.Lock()
-JOBS = {}
+class _Job(TypedDict):
+    """A running pull-all job: its SSE event queue and creation time."""
 
-# Authentication token — set at startup by __main__.
-# When set (not None), every API and SSE request must include ?token=<value>
-# or it gets a 403.  Static assets and the root HTML page are always
-# accessible (the HTML page itself carries the token in its URL query).
-#
-# This protects against CSRF, DNS rebinding, and random local processes
-# discovering the port and calling destructive endpoints (discard, etc.).
-# Launch token — the single-use entry credential printed / opened at startup
-# (``/?token=<launch>``).  It is ONLY accepted for the one-time exchange that
-# turns it into a signed session cookie (see ``_get_index``); the launch token
-# itself is never accepted by API/SSE routes (see ``_check_token``).
-AUTH_TOKEN: str | None = None
+    queue: queue.Queue[dict[str, Any]]
+    created: float
 
-# HMAC key used to sign web-session cookies.  Persisted across restarts (see
-# __main__.py) so a browser's cookies survive a server restart.  ``None`` here
-# means the signing feature is disabled (used by tests for unauth'd requests).
-SESSION_SECRET: bytes | None = None
+
+# The single application-state object, populated by __main__ at startup and
+# reset per test.  Every mutable bit of state (config, auth, jobs, login
+# throttling) lives on this one object — see :class:`HarborApp` in state.py.
+app_state: HarborApp = HarborApp()
 
 # Signed cookie that authenticates every fetch/SSE request (browsers send it
 # same-origin automatically, so the token no longer needs to appear in URLs).
@@ -57,8 +47,8 @@ SESSION_MAX_AGE_DAYS = 30
 _SESSION_SEP = "|"  # separator inside the signed payload; never in host:port
 
 # A job whose SSE consumer never read its "done" event (client disconnect)
-# would otherwise sit in JOBS forever.  Sweep entries older than this TTL
-# lazily, whenever a new job is started.
+# would otherwise sit in app_state.jobs forever.  Sweep entries older than
+# this TTL lazily, whenever a new job is started.
 JOB_TTL_SECONDS = 3600
 
 MAX_WORKERS = 8
@@ -68,6 +58,21 @@ MAX_WORKERS = 8
 # be read into memory and could OOM the process.  Legitimate requests (a token
 # form field, a roots list, a small action payload) are far below this.
 MAX_BODY_BYTES = 1024 * 1024
+
+# /login brute-force throttling.  The launch token is a single random secret,
+# but a local process could still probe the login endpoint repeatedly; bound how
+# many failed attempts a client may make within a rolling window before the
+# endpoint refuses (429) and forces a pause.  A successful login resets it.
+# Attempt history lives on app_state.login_failures (guarded by login_lock).
+LOGIN_WINDOW_SECONDS = 60.0
+LOGIN_MAX_FAILURES = 5
+
+# Upper bound on the in-flight event buffer of a pull-all SSE job.  pull_one
+# emits a small fixed number of events per repo, but a huge root tree with no
+# SSE consumer reading the queue would otherwise pile events up in memory.  A
+# bound adds backpressure.  Pull worker threads are daemonized, so a blocked
+# producer cannot prevent process exit (it just no longer grows the buffer).
+MAX_SSE_QUEUE_EVENTS = 1024
 
 # The UI is a single self-contained page with inline <script>/<style>, so
 # 'unsafe-inline' is unavoidable without a build step — but we still forbid
@@ -89,14 +94,16 @@ CSP_HEADER = (
 # The repo routes use a greedy `(?P<path>.+)` so URL-encoded paths with
 # embedded slashes (e.g. /Users/x/work/api) match as a single segment.
 # ---------------------------------------------------------------------------
-_ROUTES = []
+_ROUTES: list[tuple[str, re.Pattern[str], Callable[..., Any]]] = []
 
 
-def _route(method, pattern):
+def _route(
+    method: str, pattern: str
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a route handler.  Pattern is matched against the URL path."""
     compiled = re.compile(pattern)
 
-    def decorator(fn):
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         _ROUTES.append((method, compiled, fn))
         return fn
 
@@ -104,14 +111,15 @@ def _route(method, pattern):
 
 
 @_route("GET", r"^/$")
-def _get_index(self, m, parsed, body):
+def _get_index(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) -> None:
     """Serve the app.  A request to ``/?token=<launch>`` performs the one-time
     launch-token exchange: issue a signed session cookie, then redirect to the
     clean ``/`` so the token leaves the address bar and browser history."""
-    if AUTH_TOKEN is not None:
+    if app_state.auth_token is not None:
         qs = parse_qs(parsed.query)
-        launch = (qs.get("token") or [None])[0]
-        if launch and SESSION_SECRET is not None and launch == AUTH_TOKEN:
+        tokens = qs.get("token")
+        launch = tokens[0] if tokens else None
+        if launch and app_state.session_secret is not None and launch == app_state.auth_token:
             host = self.headers.get("Host", "")
             self.send_response(302)
             self._set_session_cookie(_normalize_hostport(host))
@@ -123,9 +131,21 @@ def _get_index(self, m, parsed, body):
 
 
 @_route("POST", r"^/login$")
-def _post_login(self, m, parsed, body):
+def _post_login(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     """Token entry form submission.  On success, issue a session cookie and
-    redirect to the clean ``/`` (no token in the URL)."""
+    redirect to the clean ``/`` (no token in the URL).
+
+    Failed attempts are rate-limited per client (see ``_login_throttled``) so a
+    local process can't brute-force the launch token."""
+    # Rate-limit bookkeeping happens before parsing the body so a flood of
+    # attempts can't even reach the token comparison.
+    if app_state.auth_token is not None and _login_throttled(self.client_address[0]):
+        self._send_json(
+            429, {"ok": False, "error": "too many attempts, try again later"}
+        )
+        return
     # Accept both form-encoded and JSON bodies.
     if isinstance(body, dict):
         token = (body.get("token") or "").strip()
@@ -133,56 +153,82 @@ def _post_login(self, m, parsed, body):
         qs = parse_qs(body or "")
         token = (qs.get("token") or [""])[0].strip()
 
-    if AUTH_TOKEN is None or token == AUTH_TOKEN:
+    if app_state.auth_token is None or token == app_state.auth_token:
+        _login_success(self.client_address[0])
         self._send_json(
             200,
             {"ok": True, "redirect": "/"},
             set_cookie=(
                 _normalize_hostport(self.headers.get("Host", ""))
-                if SESSION_SECRET is not None
+                if app_state.session_secret is not None
                 else None
             ),
         )
         return
+    _login_failure(self.client_address[0])
     self._send_json(401, {"ok": False, "error": "invalid token"})
 
 
 @_route("GET", r"^/static/(?P<name>[^/]+)$")
-def _get_static(self, m, parsed, body):
+def _get_static(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     self._serve_static_file(m.group("name"))
 
 
 @_route("GET", r"^/favicon\.ico$")
-def _get_favicon(self, m, parsed, body):
+def _get_favicon(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     """Serve SVG favicon at the /favicon.ico path for broad browser support."""
     self._serve_static_file("favicon.svg")
 
 
 @_route("GET", r"^/api/repos$")
-def _get_repos(self, m, parsed, body):
-    self._send_json(200, git_ops.get_repos_status(app_state.repos))
+def _get_repos(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) -> None:
+    """Serve the cached status snapshot, recomputed in the background.
+
+    If the snapshot is empty but repos exist — first request before the
+    refresher's first tick, or a rescan just invalidated it — compute once on
+    demand so the UI never shows an empty list.
+    """
+    snapshot = app_state.repo_status
+    if not snapshot and app_state.repos:
+        snapshot = {s["path"]: s for s in git_ops.get_repos_status(app_state.repos)}
+        app_state.repo_status = snapshot
+    self._send_json(
+        200,
+        list(snapshot.values()),
+        headers={"X-Harbor-Scan-Gen": str(app_state.scan_generation)},
+    )
 
 
 @_route("GET", r"^/api/roots$")
-def _get_roots(self, m, parsed, body):
+def _get_roots(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) -> None:
     # Renamed `l` → `label` to clear the E741 lint.
     self._send_json(200, [{"path": p, "label": label} for p, label in app_state.roots])
 
 
 @_route("GET", r"^/api/browse$")
-def _get_browse(self, m, parsed, body):
+def _get_browse(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     qs = parse_qs(parsed.query)
     dir_path = os.path.expanduser((qs.get("path") or [os.path.expanduser("~")])[0])
     self._send_json(200, _browse_dir(dir_path))
 
 
 @_route("GET", r"^/api/stream$")
-def _get_stream(self, m, parsed, body):
+def _get_stream(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     self._stream(parse_qs(parsed.query))
 
 
 @_route("GET", r"^/api/repo/(?P<path>.+)/diff$")
-def _get_repo_diff(self, m, parsed, body):
+def _get_repo_diff(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     path = unquote(m.group("path"))
     diff = git_ops.get_diff(path, app_state.repos)
     if diff is None:
@@ -192,13 +238,17 @@ def _get_repo_diff(self, m, parsed, body):
 
 
 @_route("POST", r"^/api/pull-all$")
-def _post_pull_all(self, m, parsed, body):
+def _post_pull_all(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     job_id = start_pull_all_job(app_state.repos)
     self._send_json(200, {"job_id": job_id})
 
 
 @_route("POST", r"^/api/roots$")
-def _post_roots(self, m, parsed, body):
+def _post_roots(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     path = (body.get("path") or "").strip()
     label = (body.get("label") or "").strip() or os.path.basename(
         os.path.expanduser(path)
@@ -223,22 +273,23 @@ def _post_roots(self, m, parsed, body):
 
 
 @_route("POST", r"^/api/rescan$")
-def _post_rescan(self, m, parsed, body):
-    roots, repos = self._rescan()
-    self._send_json(
-        200,
-        {
-            "ok": True,
-            "roots": [{"path": p, "label": label} for p, label in roots],
-            "count": len(repos),
-            "min_depth": app_state.min_depth,
-            "max_depth": app_state.max_depth,
-        },
-    )
+def _post_rescan(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
+    """Trigger a background rescan and return immediately.
+
+    The scan runs off the request thread; when it completes it bumps
+    ``app_state.scan_generation`` (reported via the X-Harbor-Scan-Gen header
+    on /api/repos), which the frontend polls for before updating the UI.
+    """
+    self._rescan()
+    self._send_json(200, {"ok": True, "pending": True})
 
 
 @_route("POST", r"^/api/repo/(?P<path>.+)/action$")
-def _post_repo_action(self, m, parsed, body):
+def _post_repo_action(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     path = unquote(m.group("path"))
     outcome = git_ops.do_action(path, body.get("action"), app_state.repos)
     # T-022: attach the repo's post-action status so the frontend can update
@@ -249,12 +300,21 @@ def _post_repo_action(self, m, parsed, body):
     if outcome.status == "ok":
         repo = app_state.repos.get(path)
         if repo is not None:
-            result["status"] = git_ops.repo_status(repo)
+            fresh = git_ops.repo_status(repo)
+            result["status"] = fresh
+            # Keep the background snapshot consistent so the next poll doesn't
+            # revert this card to its pre-action status.
+            if path in app_state.repo_status:
+                snapshot = dict(app_state.repo_status)
+                snapshot[path] = fresh
+                app_state.repo_status = snapshot
     self._send_json(http_code, result)
 
 
 @_route("DELETE", r"^/api/roots/(?P<path>.+)$")
-def _delete_root(self, m, parsed, body):
+def _delete_root(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     path = unquote(m.group("path"))
     # Remove from in-memory roots (source of truth)
     before = len(app_state.roots)
@@ -303,7 +363,10 @@ def _new_session_cookie(hostport: str) -> str:
     """
     exp = int(time.time()) + SESSION_MAX_AGE_DAYS * 86400
     payload = f"{exp}{_SESSION_SEP}{hostport}".encode()
-    sig = hmac.new(SESSION_SECRET, payload, hashlib.sha256).hexdigest()
+    secret = app_state.session_secret
+    if secret is None:
+        raise RuntimeError("session signing secret not configured")
+    sig = hmac.new(secret, payload, hashlib.sha256).hexdigest()
     enc = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
     return f"{sig}.{enc}"
 
@@ -312,7 +375,7 @@ def _valid_session_cookie(value: str, hostport: str) -> bool:
     """Validate a session cookie's signature, expiry, and host:port binding."""
     if not value:
         return False
-    if SESSION_SECRET is None:
+    if app_state.session_secret is None:
         # Signing disabled — accept anything (tests / no-auth mode).
         return True
     try:
@@ -322,7 +385,7 @@ def _valid_session_cookie(value: str, hostport: str) -> bool:
     except (ValueError, TypeError, binascii.Error, UnicodeDecodeError):
         return False
     good_sig = hmac.compare_digest(
-        sig, hmac.new(SESSION_SECRET, payload, hashlib.sha256).hexdigest()
+        sig, hmac.new(app_state.session_secret, payload, hashlib.sha256).hexdigest()
     )
     if not good_sig:
         return False
@@ -342,20 +405,46 @@ def _extract_cookie(header: str, name: str) -> str | None:
     for part in header.split(";"):
         part = part.strip()
         if part.startswith(prefix):
-            return part[len(prefix):]
+            return part[len(prefix) :]
     return None
 
 
-def _outcome_http_code(outcome) -> int:
+def _login_throttled(addr: str) -> bool:
+    """Return True if *addr* has exhausted its login attempt budget.
+
+    Keeps ``app_state.login_failures`` trimmed to a rolling window so staleness never
+    accumulates unboundedly."""
+    with app_state.login_lock:
+        now = time.monotonic()
+        keep = [
+            t for t in app_state.login_failures.get(addr, []) if now - t < LOGIN_WINDOW_SECONDS
+        ]
+        app_state.login_failures[addr] = keep
+        return len(keep) >= LOGIN_MAX_FAILURES
+
+
+def _login_failure(addr: str) -> None:
+    """Record a failed login so the next attempt counts toward throttling."""
+    with app_state.login_lock:
+        app_state.login_failures.setdefault(addr, []).append(time.monotonic())
+
+
+def _login_success(addr: str) -> None:
+    """Clear attempt history on a successful login."""
+    with app_state.login_lock:
+        app_state.login_failures.pop(addr, None)
+
+
+def _outcome_http_code(outcome: git_ops.ActionOutcome) -> int:
     """Translate an :class:`ActionOutcome` status into an HTTP status code."""
     mapping = {"ok": 200, "skipped": 200, "not_found": 404, "bad_request": 400}
     return mapping.get(outcome.status, 200)
 
 
-def _browse_dir(path):
+def _browse_dir(path: str) -> dict[str, Any]:
     """Return a list of subdirectories for the given path."""
     path = os.path.expanduser(path)
-    result = {"path": path, "parent": os.path.dirname(path), "dirs": []}
+    result: dict[str, Any] = {"path": path, "parent": os.path.dirname(path), "dirs": []}
     try:
         path = os.path.realpath(path)
         for name in sorted(os.listdir(path)):
@@ -367,31 +456,31 @@ def _browse_dir(path):
     return result
 
 
-def _sweep_stale_jobs():
+def _sweep_stale_jobs() -> int:
     """Drop jobs older than JOB_TTL_SECONDS.  Returns how many were swept."""
     now = time.monotonic()
-    with JOBS_LOCK:
+    with app_state.jobs_lock:
         stale = [
             jid
-            for jid, job in JOBS.items()
+            for jid, job in app_state.jobs.items()
             if now - job.get("created", now) > JOB_TTL_SECONDS
         ]
         for jid in stale:
-            JOBS.pop(jid, None)
+            app_state.jobs.pop(jid, None)
     if stale:
-        logger.info("swept %d stale job(s) from JOBS", len(stale))
+        logger.info("swept %d stale job(s) from the pull-all table", len(stale))
     return len(stale)
 
 
-def start_pull_all_job(repos):
+def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
     """Start a background pull-all job and return its job_id."""
     _sweep_stale_jobs()
     job_id = uuid.uuid4().hex
-    q = queue.Queue()
-    with JOBS_LOCK:
-        JOBS[job_id] = {"queue": q, "created": time.monotonic()}
+    q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=MAX_SSE_QUEUE_EVENTS)
+    with app_state.jobs_lock:
+        app_state.jobs[job_id] = {"queue": q, "created": time.monotonic()}
 
-    def worker():
+    def worker() -> None:
         try:
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
                 futures = [ex.submit(git_ops.pull_one, r, q) for r in repos.values()]
@@ -413,11 +502,124 @@ def start_pull_all_job(repos):
     return job_id
 
 
+# ---------------------------------------------------------------------------
+# Background status refresh
+# ---------------------------------------------------------------------------
+
+# The frontend polls /api/repos every 30s while visible; the background
+# refresher recomputes statuses on the same cadence so every poll is a cheap
+# snapshot read instead of spawning one ``git status`` per repo per request.
+REFRESH_INTERVAL = 30.0
+
+
+def _refresh_once(app: HarborApp) -> None:
+    """Compute one fresh status snapshot for ``app.repos`` and swap it in.
+
+    The snapshot is swapped in only if the repo set didn't change while we
+    were computing (a rescan rebinds ``app.repos``, making a concurrent result
+    stale — the snapshot is dropped instead, and the next /api/repos falls
+    back to an on-demand compute).
+    """
+    repos = app.repos
+    try:
+        snapshot = {s["path"]: s for s in git_ops.get_repos_status(repos)}
+    except Exception:
+        # One bad iteration (a pathological repo) must not kill the
+        # refresher — log and retry next cycle.
+        logger.exception("status refresh failed; will retry")
+        snapshot = {}
+    app.repo_status = snapshot if app.repos is repos else {}
+
+
+def _refresh_loop(app: HarborApp) -> None:
+    """Background loop that keeps ``app.repo_status`` fresh.
+
+    Runs until the process exits (daemon thread).  Statuses are computed once
+    per interval for the whole repo set in the shared git executor, so every
+    /api/repos poll is a cheap snapshot read.
+    """
+    while True:
+        _refresh_once(app)
+        time.sleep(REFRESH_INTERVAL)
+
+
+def start_status_refresher(app: HarborApp) -> None:
+    """Start the background status-refresh daemon thread (idempotent)."""
+    if app.refresher is not None and app.refresher.is_alive():
+        return
+    app.refresher = threading.Thread(
+        target=_refresh_loop, args=(app,), daemon=True, name="status-refresher"
+    )
+    app.refresher.start()
+
+
+# ---------------------------------------------------------------------------
+# Background rescan
+# ---------------------------------------------------------------------------
+
+
+def _request_rescan(app: HarborApp) -> None:
+    """Kick off a background rescan; returns immediately.
+
+    Single-flight: if a worker is already running, set ``rescan_requested`` so
+    it loops once more after finishing instead of missing this mutation (a
+    quick add-then-remove of roots while a scan is in flight would otherwise
+    serve a stale repo list until the next explicit refresh).
+    """
+    with app.rescan_lock:
+        if app.rescanning:
+            app.rescan_requested = True
+            return
+        app.rescanning = True
+    threading.Thread(
+        target=_rescan_worker, args=(app,), daemon=True, name="rescan-worker"
+    ).start()
+
+
+def _rescan_worker(app: HarborApp) -> None:
+    """Run background rescans until none are requested (single-flight loop).
+
+    Each pass re-scans all roots (fast for known repos thanks to the scanner's
+    cross-scan default-branch cache), swaps in the new repo set, computes a
+    fresh status snapshot so /api/repos is instant right after, and bumps
+    ``scan_generation`` — the signal the frontend polls for.
+    """
+    while True:
+        try:
+            config = config_mod.load_config(app.config_path) or {}
+            # Reload depth settings from config (CLI args remain supreme)
+            if app.cli_min_depth is None:
+                app.min_depth = config.get("min_depth", app.min_depth)
+            if app.cli_max_depth is None:
+                app.max_depth = config.get("max_depth", app.max_depth)
+            new_repos = scanner_mod.scan_roots(
+                app.roots,
+                min_depth=app.min_depth,
+                max_depth=app.max_depth,
+            )
+            # Pre-compute the status snapshot for the new set so the frontend's
+            # post-rescan /api/repos poll is instant (no on-demand blocking).
+            statuses = git_ops.get_repos_status(new_repos)
+            app.repos = new_repos
+            app.repo_status = {s["path"]: s for s in statuses}
+            app.scan_generation += 1
+        except Exception:
+            # Do not bump the generation — the frontend's wait times out and
+            # falls back to whatever it has; the error is logged for humans.
+            logger.exception("background rescan failed")
+        with app.rescan_lock:
+            if app.rescan_requested:
+                app.rescan_requested = False
+                continue
+            app.rescanning = False
+            return
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for the Harbor web UI.
 
     All mutable state lives in the module-level :data:`app_state`
-    (:class:`AppState`) instead of class attributes, so tests can reset
+    (:class:`HarborApp`) instead of class attributes, so tests can reset
     state cleanly and multiple instances share the same state naturally.
     """
 
@@ -425,18 +627,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _send_json(self, code, obj, set_cookie=None):
+    def _send_json(
+        self,
+        code: int,
+        obj: Any,
+        set_cookie: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", CSP_HEADER)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         if set_cookie:
             self._set_session_cookie(set_cookie)
         self.end_headers()
         self.wfile.write(body)
 
-    def _set_session_cookie(self, hostport: str):
+    def _set_session_cookie(self, hostport: str) -> None:
         """Set the signed, HttpOnly session cookie for *hostport*."""
         value = _new_session_cookie(hostport)
         self.send_header(
@@ -445,7 +655,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f"Max-Age={SESSION_MAX_AGE_DAYS * 86400}",
         )
 
-    def _check_origin(self):
+    def _check_origin(self) -> bool:
         """Return True if the request may proceed; False if 403 was sent.
 
         Cross-origin mutation requests are rejected.  A missing Origin/Referer
@@ -469,7 +679,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _serve_html(self):
+    def _serve_html(self) -> None:
         try:
             with open(app_state.html_path, "rb") as f:
                 body = f.read()
@@ -483,7 +693,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_static_file(self, name):
+    def _serve_static_file(self, name: str) -> None:
         """Serve a file from the static directory by filename.
 
         Only simple filenames are allowed (no subdirectories) to prevent
@@ -515,10 +725,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _stream(self, qs):
-        job_id = (qs.get("job") or [None])[0]
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
+    def _stream(self, qs: dict[str, list[str]]) -> None:
+        job_ids = qs.get("job")
+        job_id = job_ids[0] if job_ids else None
+        if job_id is None:
+            self.send_error(404)
+            return
+        with app_state.jobs_lock:
+            job = app_state.jobs.get(job_id)
         if not job:
             self.send_error(404)
             return
@@ -544,39 +758,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
             if item.get("done"):
-                with JOBS_LOCK:
-                    JOBS.pop(job_id, None)
+                with app_state.jobs_lock:
+                    app_state.jobs.pop(job_id, None)
                 return
 
     # ------------------------------------------------------------------
     # Re-scan
     # ------------------------------------------------------------------
 
-    def _rescan(self):
-        """Re-scan all roots and update app_state.repos.
+    def _rescan(self) -> None:
+        """Kick off a background rescan; returns immediately.
 
-        Also reloads min_depth / max_depth from the config file (unless
-        overridden by CLI arguments at startup).
+        The actual scan runs on a daemon worker (see ``_rescan_worker``) so a
+        huge root tree never blocks the request thread.  The worker swaps in
+        the new repo set, computes a fresh status snapshot, and bumps
+        ``app.scan_generation`` — the frontend polls /api/repos for that
+        counter to know when the scan is done.
         """
-        config = config_mod.load_config(app_state.config_path) or {}
-        # Reload depth settings from config (CLI args remain supreme)
-        if app_state.cli_min_depth is None:
-            app_state.min_depth = config.get("min_depth", app_state.min_depth)
-        if app_state.cli_max_depth is None:
-            app_state.max_depth = config.get("max_depth", app_state.max_depth)
-        new_repos = scanner_mod.scan_roots(
-            app_state.roots,
-            min_depth=app_state.min_depth,
-            max_depth=app_state.max_depth,
-        )
-        app_state.repos = new_repos
-        return app_state.roots, new_repos
+        _request_rescan(app_state)
 
     # ------------------------------------------------------------------
     # Dispatch
     # ------------------------------------------------------------------
 
-    def _is_static_or_root(self, parsed) -> bool:
+    def _is_static_or_root(self, parsed: ParseResult) -> bool:
         """Return True if the request targets the root page or static assets.
 
         These paths are exempt from token auth so the browser can load the
@@ -594,7 +799,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             or path == "/favicon.ico"
         )
 
-    def _check_token(self, parsed) -> bool:
+    def _check_token(self, parsed: ParseResult) -> bool:
         """Return True if the request carries a valid session cookie.
 
         Sends a 403 and returns False when auth is required but missing/wrong.
@@ -602,7 +807,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         entry credential exchanged for the cookie on ``/`` and must never
         authenticate API/SSE routes directly.
         """
-        if AUTH_TOKEN is None and SESSION_SECRET is None:
+        if app_state.auth_token is None and app_state.session_secret is None:
             return True
         if self._is_static_or_root(parsed):
             return True
@@ -612,11 +817,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if value and _valid_session_cookie(value, _normalize_hostport(host)):
             return True
         self._send_json(
-            403, {"ok": False, "error": "authentication required (missing or invalid session"}
+            403,
+            {
+                "ok": False,
+                "error": "authentication required (missing or invalid session",
+            },
         )
         return False
 
-    def _dispatch(self, method, parsed, body=None):
+    def _dispatch(self, method: str, parsed: ParseResult, body: Any = None) -> None:
         # Token check is centralized here — every non-static route is protected.
         if not self._check_token(parsed):
             return
@@ -633,7 +842,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
         self.send_error(404)
 
-    def _read_json_body(self):
+    def _read_json_body(self) -> dict[str, Any] | None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length > MAX_BODY_BYTES:
             return None  # caller turns this into a 413
@@ -643,10 +852,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError):
             return None  # caller turns this into a 400
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         self._dispatch("GET", urlparse(self.path))
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length > MAX_BODY_BYTES:
             self._send_json(413, {"ok": False, "error": "request body too large"})
@@ -657,10 +866,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._dispatch("POST", urlparse(self.path), body)
 
-    def do_DELETE(self):
+    def do_DELETE(self) -> None:
         self._dispatch("DELETE", urlparse(self.path))
 
-    def log_message(self, fmt, *args):
+    def log_message(self, fmt: str, *args: Any) -> None:
         # T-011: never log the full URL which may contain the auth token.
         # We log only the path portion (without query string).
         msg = fmt % args

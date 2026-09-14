@@ -24,7 +24,7 @@ import pytest
 from harbor import config as config_mod
 from harbor import scanner as scanner_mod
 from harbor import server as server_mod
-from harbor.state import AppState
+from harbor.state import HarborApp
 
 pytestmark = pytest.mark.e2e
 
@@ -90,9 +90,7 @@ def server_url(tmp_path):
     static_dir = os.path.join(os.path.dirname(server_mod.__file__), "static")
     html_path = os.path.join(static_dir, "index.html")
     saved_state = server_mod.app_state
-    saved_token = server_mod.AUTH_TOKEN
-    saved_secret = server_mod.SESSION_SECRET
-    server_mod.app_state = AppState(
+    server_mod.app_state = HarborApp(
         repos=repos,
         roots=[(str(tmp_path), "test")],
         html_path=html_path,
@@ -100,10 +98,10 @@ def server_url(tmp_path):
         config_path=str(config_path),
         min_depth=1,
         max_depth=3,
+        # Launch token + signing key, as __main__.py would set them.
+        auth_token="test-token-123",
+        session_secret=b"e2e-session-secret-16-bytes!!",
     )
-    server_mod.AUTH_TOKEN = "test-token-123"
-    # Signing key for the session cookie (as __main__.py would set it).
-    server_mod.SESSION_SECRET = b"e2e-session-secret-16-bytes!!"
 
     port = _free_port()
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), server_mod.Handler)
@@ -126,8 +124,6 @@ def server_url(tmp_path):
 
     httpd.shutdown()
     server_mod.app_state = saved_state
-    server_mod.AUTH_TOKEN = saved_token
-    server_mod.SESSION_SECRET = saved_secret
 
 
 # ---------------------------------------------------------------------------
@@ -361,10 +357,9 @@ def test_diff_preview_opens_and_shows_content(page, server_url):
     assert diff_overlay.evaluate("el => el.classList.contains('show')")
 
     # Diff body should load (wait for fetch + render)
-    page.wait_for_selector("#diffBody .d-line", timeout=5000)
-    # At least some diff lines
-    lines = page.locator("#diffBody .d-line")
-    assert lines.count() > 0
+    page.wait_for_selector("#diffBody .d-pre", timeout=5000)
+    pre = page.locator("#diffBody .d-pre")
+    assert pre.text_content() != ""
     # Title should show the repo name
     assert page.locator("#diffTitle").text_content() != ""
 
@@ -678,12 +673,14 @@ def test_browse_directory_navigation(page, server_url, tmp_path):
     page.wait_for_selector("#settingsOverlay.show", timeout=5000)
     page.wait_for_selector("#browseList", timeout=5000)
 
-    # Quick nav: Home button loads a path
+    # Quick nav: Home button loads a path.  The home directory may legitimately
+    # hold no visible (non-hidden) subdirectories — e.g. a CI container running
+    # as root where /root only contains dot-dirs — so accept either a rendered
+    # item list or the empty state as proof the nav loaded.
     page.locator('#browseQuick button[data-path="~"]').click()
-    # Wait for browse list to render items
-    page.wait_for_selector("#browseList .browse-item", timeout=5000)
-    home_items = page.locator("#browseList .browse-item").count()
-    assert home_items > 0
+    page.wait_for_selector(
+        "#browseList .browse-item, #browseList .browse-empty", timeout=5000
+    )
 
     # Quick nav: root button works
     page.locator('#browseQuick button[data-path="/"]').click()
