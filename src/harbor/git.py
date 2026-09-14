@@ -8,12 +8,14 @@ translating them into HTTP responses.
 
 import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +38,9 @@ class Repo:
     default_branch: str | None = None
 
     # Extra scanner-cached attributes can be added via this catch-all.
-    extras: dict = field(default_factory=dict)
+    extras: dict[str, Any] = field(default_factory=dict)
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         """Return a plain dict representation for the frontend."""
         d = asdict(self)
         # Flatten extras into the top level for backwards compatibility.
@@ -59,7 +61,7 @@ class ActionOutcome:
     output: str = ""
     status: str = "ok"  # "ok" | "not_found" | "bad_request" | "skipped"
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return {"ok": self.ok, "output": self.output}
 
 
@@ -72,7 +74,7 @@ GIT_TIMEOUT = 10
 PULL_TIMEOUT = 120
 
 
-def _git_env():
+def _git_env() -> dict[str, str]:
     """Environment for git subprocesses with interactive prompts disabled.
 
     Harbor has no TTY, so a credential prompt (HTTPS askpass, Git Credential
@@ -87,7 +89,9 @@ def _git_env():
     return env
 
 
-def run_git(path, *args, timeout=GIT_TIMEOUT):
+def run_git(
+    path: str, *args: str, timeout: float = GIT_TIMEOUT
+) -> tuple[int | None, str, str]:
     """Execute a git command in *path* and return (returncode, stdout, stderr).
 
     Returns ``rc=None`` when the command times out — callers treat any
@@ -105,7 +109,7 @@ def run_git(path, *args, timeout=GIT_TIMEOUT):
     return p.returncode, p.stdout, p.stderr
 
 
-def parse_porcelain_v2(text):
+def parse_porcelain_v2(text: str) -> dict[str, Any]:
     """Parse ``git status --porcelain=v2 --branch`` output into a status dict.
 
     Pure function (no I/O) so every branch shape can be unit-tested:
@@ -147,7 +151,7 @@ def parse_porcelain_v2(text):
     }
 
 
-def repo_status(repo):
+def repo_status(repo: Repo | dict[str, Any]) -> dict[str, Any]:
     """Return a dict describing the current state of *repo*.
 
     All per-repo facts come from a single ``git status --porcelain=v2
@@ -205,7 +209,7 @@ STATUS_WORKERS = 8
 _EXECUTOR = ThreadPoolExecutor(max_workers=STATUS_WORKERS)
 
 
-def get_repos_status(repos):
+def get_repos_status(repos: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Return status for every repo in *repos*, collected concurrently.
 
     Each repo runs several git subprocesses; running them in a thread pool
@@ -216,21 +220,21 @@ def get_repos_status(repos):
     return list(_EXECUTOR.map(repo_status, repos.values()))
 
 
-def _repo_path(repo) -> str:
+def _repo_path(repo: Repo | dict[str, Any]) -> str:
     """Extract the filesystem path from a repo (dataclass or dict)."""
     if isinstance(repo, Repo):
         return repo.path
-    return repo["path"]
+    return str(repo["path"])
 
 
-def _repo_name(repo) -> str:
+def _repo_name(repo: Repo | dict[str, Any]) -> str:
     """Extract the display name from a repo (dataclass or dict)."""
     if isinstance(repo, Repo):
         return repo.name
-    return repo["name"]
+    return str(repo["name"])
 
 
-def safe_pull_check(path: str):
+def safe_pull_check(path: str) -> tuple[bool, str]:
     """Check whether it is safe to pull *path*.
 
     Returns ``(can_pull, reason)`` where *can_pull* is True when the repo
@@ -253,7 +257,7 @@ def safe_pull_check(path: str):
     return True, ""
 
 
-def pull_one(repo, q):
+def pull_one(repo: Repo | dict[str, Any], q: queue.Queue[dict[str, Any]]) -> None:
     """Pull a single repo, pushing progress events to *q*."""
     name = _repo_name(repo)
     path = _repo_path(repo)
@@ -282,7 +286,7 @@ def pull_one(repo, q):
 MAX_DIFF_BYTES = 512 * 1024
 
 
-def get_diff(path, repos):
+def get_diff(path: str, repos: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     """Return tracked diff and untracked files for a repo.
 
     The tracked diff is truncated at MAX_DIFF_BYTES (cut at a line boundary)
@@ -311,7 +315,9 @@ def get_diff(path, repos):
     return {"diff": tracked_diff, "untracked": untracked, "truncated": truncated}
 
 
-def do_action(path: str, action: str, repos) -> ActionOutcome:
+def do_action(
+    path: str, action: str, repos: dict[str, dict[str, Any]]
+) -> ActionOutcome:
     """Execute a named action on a repo.
 
     Returns an :class:`ActionOutcome` with ``ok``, ``output``, and
@@ -367,7 +373,7 @@ def do_action(path: str, action: str, repos) -> ActionOutcome:
     return ActionOutcome(ok=(rc == 0), output=(out + err).strip(), status="ok")
 
 
-def _default_branch(path):
+def _default_branch(path: str) -> str | None:
     """Return the default branch name for a repo, or None.
 
     Tries ``refs/remotes/origin/HEAD`` first (the canonical answer after a

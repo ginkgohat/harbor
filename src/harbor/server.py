@@ -15,8 +15,10 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import parse_qs, unquote, urlparse
+from typing import Any, TypedDict
+from urllib.parse import ParseResult, parse_qs, unquote, urlparse
 
 from . import config as config_mod
 from . import git as git_ops
@@ -25,12 +27,20 @@ from .state import AppState
 
 logger = logging.getLogger(__name__)
 
+
+class _Job(TypedDict):
+    """A running pull-all job: its SSE event queue and creation time."""
+
+    queue: queue.Queue[dict[str, Any]]
+    created: float
+
+
 # Module-level application state — populated by __main__ at startup.
 # Tests can also set this directly to avoid touching class attributes.
 app_state: AppState = AppState()
 
 JOBS_LOCK = threading.Lock()
-JOBS = {}
+JOBS: dict[str, _Job] = {}
 
 # Authentication token — set at startup by __main__.
 # When set (not None), every API and SSE request must include ?token=<value>
@@ -105,14 +115,16 @@ CSP_HEADER = (
 # The repo routes use a greedy `(?P<path>.+)` so URL-encoded paths with
 # embedded slashes (e.g. /Users/x/work/api) match as a single segment.
 # ---------------------------------------------------------------------------
-_ROUTES = []
+_ROUTES: list[tuple[str, re.Pattern[str], Callable[..., Any]]] = []
 
 
-def _route(method, pattern):
+def _route(
+    method: str, pattern: str
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a route handler.  Pattern is matched against the URL path."""
     compiled = re.compile(pattern)
 
-    def decorator(fn):
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         _ROUTES.append((method, compiled, fn))
         return fn
 
@@ -120,13 +132,14 @@ def _route(method, pattern):
 
 
 @_route("GET", r"^/$")
-def _get_index(self, m, parsed, body):
+def _get_index(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) -> None:
     """Serve the app.  A request to ``/?token=<launch>`` performs the one-time
     launch-token exchange: issue a signed session cookie, then redirect to the
     clean ``/`` so the token leaves the address bar and browser history."""
     if AUTH_TOKEN is not None:
         qs = parse_qs(parsed.query)
-        launch = (qs.get("token") or [None])[0]
+        tokens = qs.get("token")
+        launch = tokens[0] if tokens else None
         if launch and SESSION_SECRET is not None and launch == AUTH_TOKEN:
             host = self.headers.get("Host", "")
             self.send_response(302)
@@ -139,7 +152,9 @@ def _get_index(self, m, parsed, body):
 
 
 @_route("POST", r"^/login$")
-def _post_login(self, m, parsed, body):
+def _post_login(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     """Token entry form submission.  On success, issue a session cookie and
     redirect to the clean ``/`` (no token in the URL).
 
@@ -148,7 +163,9 @@ def _post_login(self, m, parsed, body):
     # Rate-limit bookkeeping happens before parsing the body so a flood of
     # attempts can't even reach the token comparison.
     if AUTH_TOKEN is not None and _login_throttled(self.client_address[0]):
-        self._send_json(429, {"ok": False, "error": "too many attempts, try again later"})
+        self._send_json(
+            429, {"ok": False, "error": "too many attempts, try again later"}
+        )
         return
     # Accept both form-encoded and JSON bodies.
     if isinstance(body, dict):
@@ -174,41 +191,51 @@ def _post_login(self, m, parsed, body):
 
 
 @_route("GET", r"^/static/(?P<name>[^/]+)$")
-def _get_static(self, m, parsed, body):
+def _get_static(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     self._serve_static_file(m.group("name"))
 
 
 @_route("GET", r"^/favicon\.ico$")
-def _get_favicon(self, m, parsed, body):
+def _get_favicon(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     """Serve SVG favicon at the /favicon.ico path for broad browser support."""
     self._serve_static_file("favicon.svg")
 
 
 @_route("GET", r"^/api/repos$")
-def _get_repos(self, m, parsed, body):
+def _get_repos(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) -> None:
     self._send_json(200, git_ops.get_repos_status(app_state.repos))
 
 
 @_route("GET", r"^/api/roots$")
-def _get_roots(self, m, parsed, body):
+def _get_roots(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) -> None:
     # Renamed `l` → `label` to clear the E741 lint.
     self._send_json(200, [{"path": p, "label": label} for p, label in app_state.roots])
 
 
 @_route("GET", r"^/api/browse$")
-def _get_browse(self, m, parsed, body):
+def _get_browse(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     qs = parse_qs(parsed.query)
     dir_path = os.path.expanduser((qs.get("path") or [os.path.expanduser("~")])[0])
     self._send_json(200, _browse_dir(dir_path))
 
 
 @_route("GET", r"^/api/stream$")
-def _get_stream(self, m, parsed, body):
+def _get_stream(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     self._stream(parse_qs(parsed.query))
 
 
 @_route("GET", r"^/api/repo/(?P<path>.+)/diff$")
-def _get_repo_diff(self, m, parsed, body):
+def _get_repo_diff(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     path = unquote(m.group("path"))
     diff = git_ops.get_diff(path, app_state.repos)
     if diff is None:
@@ -218,13 +245,17 @@ def _get_repo_diff(self, m, parsed, body):
 
 
 @_route("POST", r"^/api/pull-all$")
-def _post_pull_all(self, m, parsed, body):
+def _post_pull_all(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     job_id = start_pull_all_job(app_state.repos)
     self._send_json(200, {"job_id": job_id})
 
 
 @_route("POST", r"^/api/roots$")
-def _post_roots(self, m, parsed, body):
+def _post_roots(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     path = (body.get("path") or "").strip()
     label = (body.get("label") or "").strip() or os.path.basename(
         os.path.expanduser(path)
@@ -249,7 +280,9 @@ def _post_roots(self, m, parsed, body):
 
 
 @_route("POST", r"^/api/rescan$")
-def _post_rescan(self, m, parsed, body):
+def _post_rescan(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     roots, repos = self._rescan()
     self._send_json(
         200,
@@ -264,7 +297,9 @@ def _post_rescan(self, m, parsed, body):
 
 
 @_route("POST", r"^/api/repo/(?P<path>.+)/action$")
-def _post_repo_action(self, m, parsed, body):
+def _post_repo_action(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     path = unquote(m.group("path"))
     outcome = git_ops.do_action(path, body.get("action"), app_state.repos)
     # T-022: attach the repo's post-action status so the frontend can update
@@ -280,7 +315,9 @@ def _post_repo_action(self, m, parsed, body):
 
 
 @_route("DELETE", r"^/api/roots/(?P<path>.+)$")
-def _delete_root(self, m, parsed, body):
+def _delete_root(
+    self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
+) -> None:
     path = unquote(m.group("path"))
     # Remove from in-memory roots (source of truth)
     before = len(app_state.roots)
@@ -329,7 +366,10 @@ def _new_session_cookie(hostport: str) -> str:
     """
     exp = int(time.time()) + SESSION_MAX_AGE_DAYS * 86400
     payload = f"{exp}{_SESSION_SEP}{hostport}".encode()
-    sig = hmac.new(SESSION_SECRET, payload, hashlib.sha256).hexdigest()
+    secret = SESSION_SECRET
+    if secret is None:
+        raise RuntimeError("session signing secret not configured")
+    sig = hmac.new(secret, payload, hashlib.sha256).hexdigest()
     enc = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
     return f"{sig}.{enc}"
 
@@ -368,11 +408,11 @@ def _extract_cookie(header: str, name: str) -> str | None:
     for part in header.split(";"):
         part = part.strip()
         if part.startswith(prefix):
-            return part[len(prefix):]
+            return part[len(prefix) :]
     return None
 
 
-def _login_throttled(addr) -> bool:
+def _login_throttled(addr: str) -> bool:
     """Return True if *addr* has exhausted its login attempt budget.
 
     Keeps ``_LOGIN_FAILURES`` trimmed to a rolling window so staleness never
@@ -386,28 +426,28 @@ def _login_throttled(addr) -> bool:
         return len(keep) >= LOGIN_MAX_FAILURES
 
 
-def _login_failure(addr):
+def _login_failure(addr: str) -> None:
     """Record a failed login so the next attempt counts toward throttling."""
     with _LOGIN_LOCK:
         _LOGIN_FAILURES.setdefault(addr, []).append(time.monotonic())
 
 
-def _login_success(addr):
+def _login_success(addr: str) -> None:
     """Clear attempt history on a successful login."""
     with _LOGIN_LOCK:
         _LOGIN_FAILURES.pop(addr, None)
 
 
-def _outcome_http_code(outcome) -> int:
+def _outcome_http_code(outcome: git_ops.ActionOutcome) -> int:
     """Translate an :class:`ActionOutcome` status into an HTTP status code."""
     mapping = {"ok": 200, "skipped": 200, "not_found": 404, "bad_request": 400}
     return mapping.get(outcome.status, 200)
 
 
-def _browse_dir(path):
+def _browse_dir(path: str) -> dict[str, Any]:
     """Return a list of subdirectories for the given path."""
     path = os.path.expanduser(path)
-    result = {"path": path, "parent": os.path.dirname(path), "dirs": []}
+    result: dict[str, Any] = {"path": path, "parent": os.path.dirname(path), "dirs": []}
     try:
         path = os.path.realpath(path)
         for name in sorted(os.listdir(path)):
@@ -419,7 +459,7 @@ def _browse_dir(path):
     return result
 
 
-def _sweep_stale_jobs():
+def _sweep_stale_jobs() -> int:
     """Drop jobs older than JOB_TTL_SECONDS.  Returns how many were swept."""
     now = time.monotonic()
     with JOBS_LOCK:
@@ -435,15 +475,15 @@ def _sweep_stale_jobs():
     return len(stale)
 
 
-def start_pull_all_job(repos):
+def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
     """Start a background pull-all job and return its job_id."""
     _sweep_stale_jobs()
     job_id = uuid.uuid4().hex
-    q = queue.Queue(maxsize=MAX_SSE_QUEUE_EVENTS)
+    q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=MAX_SSE_QUEUE_EVENTS)
     with JOBS_LOCK:
         JOBS[job_id] = {"queue": q, "created": time.monotonic()}
 
-    def worker():
+    def worker() -> None:
         try:
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
                 futures = [ex.submit(git_ops.pull_one, r, q) for r in repos.values()]
@@ -477,7 +517,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _send_json(self, code, obj, set_cookie=None):
+    def _send_json(self, code: int, obj: Any, set_cookie: str | None = None) -> None:
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -488,7 +528,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _set_session_cookie(self, hostport: str):
+    def _set_session_cookie(self, hostport: str) -> None:
         """Set the signed, HttpOnly session cookie for *hostport*."""
         value = _new_session_cookie(hostport)
         self.send_header(
@@ -497,7 +537,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f"Max-Age={SESSION_MAX_AGE_DAYS * 86400}",
         )
 
-    def _check_origin(self):
+    def _check_origin(self) -> bool:
         """Return True if the request may proceed; False if 403 was sent.
 
         Cross-origin mutation requests are rejected.  A missing Origin/Referer
@@ -521,7 +561,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _serve_html(self):
+    def _serve_html(self) -> None:
         try:
             with open(app_state.html_path, "rb") as f:
                 body = f.read()
@@ -535,7 +575,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_static_file(self, name):
+    def _serve_static_file(self, name: str) -> None:
         """Serve a file from the static directory by filename.
 
         Only simple filenames are allowed (no subdirectories) to prevent
@@ -567,8 +607,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _stream(self, qs):
-        job_id = (qs.get("job") or [None])[0]
+    def _stream(self, qs: dict[str, list[str]]) -> None:
+        job_ids = qs.get("job")
+        job_id = job_ids[0] if job_ids else None
+        if job_id is None:
+            self.send_error(404)
+            return
         with JOBS_LOCK:
             job = JOBS.get(job_id)
         if not job:
@@ -604,7 +648,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Re-scan
     # ------------------------------------------------------------------
 
-    def _rescan(self):
+    def _rescan(self) -> tuple[list[tuple[str, str]], dict[str, dict[str, Any]]]:
         """Re-scan all roots and update app_state.repos.
 
         Also reloads min_depth / max_depth from the config file (unless
@@ -628,7 +672,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Dispatch
     # ------------------------------------------------------------------
 
-    def _is_static_or_root(self, parsed) -> bool:
+    def _is_static_or_root(self, parsed: ParseResult) -> bool:
         """Return True if the request targets the root page or static assets.
 
         These paths are exempt from token auth so the browser can load the
@@ -646,7 +690,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             or path == "/favicon.ico"
         )
 
-    def _check_token(self, parsed) -> bool:
+    def _check_token(self, parsed: ParseResult) -> bool:
         """Return True if the request carries a valid session cookie.
 
         Sends a 403 and returns False when auth is required but missing/wrong.
@@ -664,11 +708,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if value and _valid_session_cookie(value, _normalize_hostport(host)):
             return True
         self._send_json(
-            403, {"ok": False, "error": "authentication required (missing or invalid session"}
+            403,
+            {
+                "ok": False,
+                "error": "authentication required (missing or invalid session",
+            },
         )
         return False
 
-    def _dispatch(self, method, parsed, body=None):
+    def _dispatch(self, method: str, parsed: ParseResult, body: Any = None) -> None:
         # Token check is centralized here — every non-static route is protected.
         if not self._check_token(parsed):
             return
@@ -685,7 +733,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
         self.send_error(404)
 
-    def _read_json_body(self):
+    def _read_json_body(self) -> dict[str, Any] | None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length > MAX_BODY_BYTES:
             return None  # caller turns this into a 413
@@ -695,10 +743,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError):
             return None  # caller turns this into a 400
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         self._dispatch("GET", urlparse(self.path))
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length > MAX_BODY_BYTES:
             self._send_json(413, {"ok": False, "error": "request body too large"})
@@ -709,10 +757,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self._dispatch("POST", urlparse(self.path), body)
 
-    def do_DELETE(self):
+    def do_DELETE(self) -> None:
         self._dispatch("DELETE", urlparse(self.path))
 
-    def log_message(self, fmt, *args):
+    def log_message(self, fmt: str, *args: Any) -> None:
         # T-011: never log the full URL which may contain the auth token.
         # We log only the path portion (without query string).
         msg = fmt % args

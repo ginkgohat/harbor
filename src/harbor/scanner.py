@@ -2,13 +2,14 @@
 
 import logging
 import os
+from typing import Any
 
 from . import git as git_ops
 
 logger = logging.getLogger(__name__)
 
 
-def _git_file_target_exists(git_file):
+def _git_file_target_exists(git_file: str) -> bool:
     """Validate a ``.git`` *file* (worktree / submodule pointer).
 
     Returns True only if the file holds a ``gitdir:`` line whose target
@@ -28,7 +29,9 @@ def _git_file_target_exists(git_file):
     return False
 
 
-def find_repos(root, min_depth=1, max_depth=5, label=None):
+def find_repos(
+    root: str, min_depth: int = 1, max_depth: int = 5, label: str | None = None
+) -> list[dict[str, Any]]:
     """Walk *root* and return every directory that contains a .git marker.
 
     The marker is either a ``.git`` subdirectory (normal repo) or a ``.git``
@@ -55,7 +58,7 @@ def find_repos(root, min_depth=1, max_depth=5, label=None):
     """
     root = os.path.realpath(os.path.expanduser(root))
     root_label = label or os.path.basename(root)
-    repos = []
+    repos: list[dict[str, Any]] = []
 
     for dirpath, dirnames, _filenames in os.walk(root):
         rel = os.path.relpath(dirpath, root)
@@ -85,7 +88,9 @@ def find_repos(root, min_depth=1, max_depth=5, label=None):
     return sorted(repos, key=lambda r: r["name"])
 
 
-def scan_roots(roots, min_depth=1, max_depth=5):
+def scan_roots(
+    roots: list[tuple[str, str]], min_depth: int = 1, max_depth: int = 5
+) -> dict[str, dict[str, Any]]:
     """Scan multiple roots and return a merged repo dict.
 
     Args:
@@ -99,7 +104,7 @@ def scan_roots(roots, min_depth=1, max_depth=5):
         ``name`` is the same.  Each value has ``name``, ``path``, and
         ``root_label``.
     """
-    all_repos = {}
+    all_repos: dict[str, dict[str, Any]] = {}
     for path, label in roots:
         for repo in find_repos(
             path, min_depth=min_depth, max_depth=max_depth, label=label

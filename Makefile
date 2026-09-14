@@ -95,8 +95,8 @@ coverage-html:  ## Run tests and generate HTML coverage report in htmlcov/ (excl
 
 lint:  ## Run lint checks (ruff + mypy)
 	$(PYTHON) -m ruff check src/ tests/
-	@# mypy only checks src/ (progressive, not required to pass yet — informational)
-	-$(PYTHON) -m mypy src/ 2>/dev/null || echo 'mypy: skipped (not installed or informational only)'
+	@# mypy checks src/ with strict mode enabled (see [tool.mypy] in pyproject.toml)
+	$(PYTHON) -m mypy src/
 
 format:  ## Auto-fix lint findings and format (same pair as the pre-commit hooks)
 	$(PYTHON) -m ruff check --fix src/ tests/

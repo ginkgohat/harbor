@@ -11,9 +11,9 @@
 
 | | 数量 |
 |---|---|
-| ✅ 已完成 | 21 |
-| 🕐 剩余待办 | 4 组（中 2 / 低 2；较高已清） |
-| 基线 | 本地：184 测试（162 非 e2e + 22 e2e）全绿；ruff 干净；前端 JS 34 通过 |
+| ✅ 已完成 | 23 |
+| 🕐 剩余待办 | 2 组（中 2 / 低 0；较高已清） |
+| 基线 | 本地：184 测试（162 非 e2e + 22 e2e）全绿；ruff 干净；前端 JS 34 通过；mypy `--strict` 0 错 |
 | CI | `lint` / `build` / `test`（5 矩阵）/ `e2e`（单 Linux + py3.12） |
 
 ---
@@ -43,6 +43,8 @@
 | 19 | Makefile `e2e-setup --with-deps` | 与 CI 行为一致，1 行。 | (`make test-e2e`) |
 | 20 | diff 大渲染（Perf#6） | `openDiff` 改用单个 `<pre>` + 一次 `textContent` 写入，替代逐行至多 5000 个 `<div>`（一次性 long-task → 单文本节点）；换取单色，changed 行数保留在副标题。移除内联 `diffLineClass`。 | e2e `test_diff`、node --check |
 | 21 | DNS rebinding（安全#2） | 完成项 #9 的 `_is_loopback_host` Host 校验本已阻塞非回环 Host（rebinding 下 Host=攻击者域名 → 403），是核心防线；SECURITY.md 补边界说明 + 既有测试佐证。 | `test_is_loopback_host` / `test_mutating_request_rejects_non_loopback_host` |
+| 22 | mypy strict（L1） | 全部 10 个源文件补全注解，`mypy --strict src/harbor` 从 153 错 → 0 错；`pyproject.toml` `strict=true`；Makefile `lint` 去掉 `|| echo`，mypy 成为真实 CI 门禁。顺手修真隐患：`hmac.new` 的 `SESSION_SECRET` None 未排除、`with os.fdopen(...,"wb") as f` 复用变量名。 | `make lint`、mypy --strict |
+| 23 | `requires-python` 上界（L2） | `>=3.10,<3.15` 已在位且与分类器一致（本地验证于 3.14.7）；无代码改动，留待 3.15 发布时复查。 | `python3.14` import/运行 |
 
 ---
 
@@ -73,11 +75,11 @@
 
 ### 低优先级
 
-- [ ] **L1. mypy strict**
-  现状：`pyproject.toml` `strict=false`；Makefile 里 mypy 是 `|| echo skipped` 的信息性检查，不卡 CI。
+- [x] **L1. mypy strict —— ✅ 已完成（见二.#22）**
+  现状：`pyproject.toml` `strict=true`；`make lint` 中 mypy 为真实门禁（无 `|| echo`）。
 
-- [ ] **L2. `requires-python` 上界**
-  现状：`>=3.10,<3.15`；待 3.15 发布后验证，或选择接受放宽上界。
+- [x] **L2. `requires-python` 上界 —— ✅ 已完成（见二.#23）**
+  现状：`>=3.10,<3.15` 已在位，与 3.10–3.14 分类器一致；本地 3.14.7 验证；待 3.15 发布复查。
 
 - [x] **L3. 小项集合 —— ✅ 全部完成（见二.#13–19）**
 

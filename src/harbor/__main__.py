@@ -19,6 +19,8 @@ import signal
 import sys
 import threading
 import webbrowser
+from types import FrameType
+from typing import NoReturn
 
 from . import __version__
 from . import config as config_mod
@@ -223,7 +225,11 @@ def _parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
             first_positional = arg
             break
 
-    if not seen_sep and first_positional is not None and first_positional in SUBCOMMANDS:
+    if (
+        not seen_sep
+        and first_positional is not None
+        and first_positional in SUBCOMMANDS
+    ):
         # Explicit subcommand — use the normal subparser tree.
         return parser.parse_args(argv)
 
@@ -235,7 +241,7 @@ def _parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
     return parser.parse_args(["serve", *argv])
 
 
-def main():
+def main() -> None:
     parser = _build_parser()
     args = _parse_args(parser)
 
@@ -259,7 +265,7 @@ def main():
     sys.exit(_run_server(args))
 
 
-def _run_server(args) -> int:
+def _run_server(args: argparse.Namespace) -> int:
     """Actually start the HTTP server.  Shared by foreground and daemon modes.
 
     Returns an exit code (0 for normal shutdown).
@@ -282,10 +288,24 @@ def _run_server(args) -> int:
             args.port, "HARBOR_PORT", "port", config, 8765, 1, 65535, "port"
         )
         min_depth = config_mod.resolve_int_setting(
-            args.min_depth, "HARBOR_MIN_DEPTH", "min_depth", config, 1, 0, 99, "min_depth"
+            args.min_depth,
+            "HARBOR_MIN_DEPTH",
+            "min_depth",
+            config,
+            1,
+            0,
+            99,
+            "min_depth",
         )
         max_depth = config_mod.resolve_int_setting(
-            args.max_depth, "HARBOR_MAX_DEPTH", "max_depth", config, 5, 0, 99, "max_depth"
+            args.max_depth,
+            "HARBOR_MAX_DEPTH",
+            "max_depth",
+            config,
+            5,
+            0,
+            99,
+            "max_depth",
         )
     except ValueError as e:
         logger.error("%s", e)
@@ -366,8 +386,8 @@ def _run_server(args) -> int:
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                     0o600,
                 )
-                with os.fdopen(sfd, "wb") as f:
-                    f.write(secret)
+                with os.fdopen(sfd, "wb") as sf:
+                    sf.write(secret)
             except OSError:
                 # Non-fatal — fall back to the in-memory secret.
                 pass
@@ -384,7 +404,7 @@ def _run_server(args) -> int:
     # On Windows, SIGTERM isn't available — skip silently.
     if hasattr(signal, "SIGTERM"):
 
-        def _handle_sigterm(signum, frame):
+        def _handle_sigterm(signum: int, frame: FrameType | None) -> NoReturn:
             raise SystemExit(0)
 
         signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -409,7 +429,7 @@ def _run_server(args) -> int:
     return 0
 
 
-def _try_open_browser(url):
+def _try_open_browser(url: str) -> None:
     """Open the browser, swallowing any error (e.g. headless environments)."""
     with contextlib.suppress(Exception):
         webbrowser.open(url)

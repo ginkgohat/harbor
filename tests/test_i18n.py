@@ -80,7 +80,11 @@ def test_str_tables_have_identical_keys():
 
 
 UTILS_JS = (
-    Path(__file__).resolve().parent.parent / "src" / "harbor" / "static" / "harbor-utils.js"
+    Path(__file__).resolve().parent.parent
+    / "src"
+    / "harbor"
+    / "static"
+    / "harbor-utils.js"
 )
 
 

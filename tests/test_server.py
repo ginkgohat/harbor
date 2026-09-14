@@ -158,7 +158,6 @@ def test_mutating_request_rejects_non_loopback_host(tmp_path):
     assert "loopback" in body["error"].lower()
 
 
-
 # ---------------------------------------------------------------------------
 # do_POST /api/rescan returns the documented shape
 # ---------------------------------------------------------------------------
