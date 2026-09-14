@@ -274,6 +274,47 @@ def test_scan_roots_caches_default_branch(tmp_path):
         assert repo["default_branch"] == "main"
 
 
+def test_scan_roots_reuses_cached_default_branch(tmp_path):
+    """A second scan of the same repos doesn't re-probe default branches.
+
+    The cross-scan probe cache (scanner._DEFAULT_BRANCH_CACHE) is what makes
+    a rescan cheap — the 1-6 subprocess per-repo probe is the dominant cost.
+    """
+    from harbor import scanner as scanner_mod
+
+    d = tmp_path / "work"
+    init_repo(d / "project-a")
+    init_repo(d / "project-b")
+    with patch(
+        "harbor.scanner.git_ops._default_branch",
+        wraps=scanner_mod.git_ops._default_branch,
+    ) as probe:
+        scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+        first_calls = probe.call_count
+        assert first_calls >= 1
+        scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+        assert probe.call_count == first_calls  # served from cache
+
+
+def test_default_branch_cache_reprobes_after_ttl(tmp_path):
+    """Expired cache entries are re-probed on the next scan."""
+    from harbor import scanner as scanner_mod
+
+    d = tmp_path / "work"
+    init_repo(d / "project-a")
+    with patch(
+        "harbor.scanner.git_ops._default_branch",
+        wraps=scanner_mod.git_ops._default_branch,
+    ) as probe:
+        scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+        first_calls = probe.call_count
+        # Age every cached entry past the TTL, then re-scan.
+        for key in list(scanner_mod._DEFAULT_BRANCH_CACHE):
+            scanner_mod._DEFAULT_BRANCH_CACHE[key] = (0.0, "main")
+        scan_roots([(str(d), "Work")], min_depth=1, max_depth=2)
+        assert probe.call_count > first_calls
+
+
 def test_repo_status_uses_cached_default_branch(tmp_path):
     init_repo(tmp_path / "r")
     repo = {"name": "r", "path": str(tmp_path / "r"), "default_branch": "main"}
