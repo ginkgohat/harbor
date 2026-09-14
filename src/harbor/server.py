@@ -69,6 +69,22 @@ MAX_WORKERS = 8
 # form field, a roots list, a small action payload) are far below this.
 MAX_BODY_BYTES = 1024 * 1024
 
+# /login brute-force throttling.  The launch token is a single random secret,
+# but a local process could still probe the login endpoint repeatedly; bound how
+# many failed attempts a client may make within a rolling window before the
+# endpoint refuses (429) and forces a pause.  A successful login resets it.
+LOGIN_WINDOW_SECONDS = 60.0
+LOGIN_MAX_FAILURES = 5
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_FAILURES: dict[str, list[float]] = {}
+
+# Upper bound on the in-flight event buffer of a pull-all SSE job.  pull_one
+# emits a small fixed number of events per repo, but a huge root tree with no
+# SSE consumer reading the queue would otherwise pile events up in memory.  A
+# bound adds backpressure.  Pull worker threads are daemonized, so a blocked
+# producer cannot prevent process exit (it just no longer grows the buffer).
+MAX_SSE_QUEUE_EVENTS = 1024
+
 # The UI is a single self-contained page with inline <script>/<style>, so
 # 'unsafe-inline' is unavoidable without a build step — but we still forbid
 # external resources and cross-origin connections (EventSource/fetch are
@@ -125,7 +141,15 @@ def _get_index(self, m, parsed, body):
 @_route("POST", r"^/login$")
 def _post_login(self, m, parsed, body):
     """Token entry form submission.  On success, issue a session cookie and
-    redirect to the clean ``/`` (no token in the URL)."""
+    redirect to the clean ``/`` (no token in the URL).
+
+    Failed attempts are rate-limited per client (see ``_login_throttled``) so a
+    local process can't brute-force the launch token."""
+    # Rate-limit bookkeeping happens before parsing the body so a flood of
+    # attempts can't even reach the token comparison.
+    if AUTH_TOKEN is not None and _login_throttled(self.client_address[0]):
+        self._send_json(429, {"ok": False, "error": "too many attempts, try again later"})
+        return
     # Accept both form-encoded and JSON bodies.
     if isinstance(body, dict):
         token = (body.get("token") or "").strip()
@@ -134,6 +158,7 @@ def _post_login(self, m, parsed, body):
         token = (qs.get("token") or [""])[0].strip()
 
     if AUTH_TOKEN is None or token == AUTH_TOKEN:
+        _login_success(self.client_address[0])
         self._send_json(
             200,
             {"ok": True, "redirect": "/"},
@@ -144,6 +169,7 @@ def _post_login(self, m, parsed, body):
             ),
         )
         return
+    _login_failure(self.client_address[0])
     self._send_json(401, {"ok": False, "error": "invalid token"})
 
 
@@ -346,6 +372,32 @@ def _extract_cookie(header: str, name: str) -> str | None:
     return None
 
 
+def _login_throttled(addr) -> bool:
+    """Return True if *addr* has exhausted its login attempt budget.
+
+    Keeps ``_LOGIN_FAILURES`` trimmed to a rolling window so staleness never
+    accumulates unboundedly."""
+    with _LOGIN_LOCK:
+        now = time.monotonic()
+        keep = [
+            t for t in _LOGIN_FAILURES.get(addr, []) if now - t < LOGIN_WINDOW_SECONDS
+        ]
+        _LOGIN_FAILURES[addr] = keep
+        return len(keep) >= LOGIN_MAX_FAILURES
+
+
+def _login_failure(addr):
+    """Record a failed login so the next attempt counts toward throttling."""
+    with _LOGIN_LOCK:
+        _LOGIN_FAILURES.setdefault(addr, []).append(time.monotonic())
+
+
+def _login_success(addr):
+    """Clear attempt history on a successful login."""
+    with _LOGIN_LOCK:
+        _LOGIN_FAILURES.pop(addr, None)
+
+
 def _outcome_http_code(outcome) -> int:
     """Translate an :class:`ActionOutcome` status into an HTTP status code."""
     mapping = {"ok": 200, "skipped": 200, "not_found": 404, "bad_request": 400}
@@ -387,7 +439,7 @@ def start_pull_all_job(repos):
     """Start a background pull-all job and return its job_id."""
     _sweep_stale_jobs()
     job_id = uuid.uuid4().hex
-    q = queue.Queue()
+    q = queue.Queue(maxsize=MAX_SSE_QUEUE_EVENTS)
     with JOBS_LOCK:
         JOBS[job_id] = {"queue": q, "created": time.monotonic()}
 

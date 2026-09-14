@@ -1619,6 +1619,11 @@ async function runAction(name, path, action) {
 }
 
 async function bulkRun(action, repoList) {
+  const batchBox = $("#batchActions");
+  const buttons = batchBox ? [...batchBox.querySelectorAll("button")] : [];
+  // Pending indicator: disable the batch controls for the duration of the run
+  // so they visibly reflect the in-progress state and can't be re-triggered.
+  buttons.forEach(b => b.disabled = true);
   $("#terminal").classList.add("open");
   document.body.classList.add("term-open");
   const total = repoList.length;
@@ -1633,7 +1638,11 @@ async function bulkRun(action, repoList) {
       termLine(`<span class="d">·</span> ${done}/${total} done`);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+  } finally {
+    buttons.forEach(b => b.disabled = false);
+  }
 }
 
 async function singlePull(name, path, btn) {

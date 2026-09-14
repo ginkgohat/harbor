@@ -1,0 +1,111 @@
+# Harbor 评审改进 —— 任务清单与状态
+
+本文件是 `harbor-review-zh.md`（原评审清单）的配套活文档，记录已改进项、剩余任务和关键决策。
+每完成一项，在「已完成」表格里追加一行，并从「剩余任务」勾掉对应勾选框。
+
+> 维护：每完成一批改动后更新此文件（数量、验证结果、决策）。条目保持简短，详细讨论见对应工具的调用历史。
+
+---
+
+## 一、快速状态
+
+| | 数量 |
+|---|---|
+| ✅ 已完成 | 19 |
+| 🕐 剩余待办 | 6 组（中 4 / 低 2；高已清） |
+| 基线 | 本地：184 测试（162 非 e2e + 22 e2e）全绿；ruff 干净；前端 JS 34 通过 |
+| CI | `lint` / `build` / `test`（5 矩阵）/ `e2e`（单 Linux + py3.12） |
+
+---
+
+## 二、已完成 ✅
+
+| # | 项 | 说明 | 验证 |
+|---|---|---|---|
+| 1 | token 进 URL → 签名会话 cookie（安全） | 启动 token 一次性兑换，`/?token=` → 302 → `harbor_session` cookie（HMAC、host:port 绑定、HttpOnly、SameSite=Strict、Max-Age=30d）；`SESSION_SECRET` 0600 持久化于 `$STATE/harbor.credentials`；启动 token 永不被 `/api` 接受。 | 181 测试含 auth 全套 |
+| 2 | 两份 i18n/工具函数漂移（可维护） | 新增 STR 表 zh/en 跨文件同步测试 `test_str_tables_in_sync_across_files`。 | test_i18n 通过 |
+| 3 | 批量体验割裂 + discard 无安全网（UX） | 批量 stash/discard/checkout 合并到 `bulkRun`；discard 改为可恢复的 `git stash push -u -m "harbor:discard <ts>"`。 | test_do_action_discard 扩展,验证 stash 可找回 |
+| 4 | `_parse_args` 启发式加固（可维护） | 抽 `SUBCOMMANDS`/`TOP_LEVEL_FLAGS`/`END_OF_OPTIONS` 常量 + `--` 转义（`harbor -- status`、`harbor -- -my-dir`）。 | tests/test_cli.py,9 用例 |
+| 5 | checkout-main 标签误导（UX#5） | 文案 "main" → "default branch / 默认分支"（zh+en STR 表同步）。 | i18n 同步测试 |
+| 6 | 搜索范围（UX#6） | 从仅 repo 名 → name/path/root_label/branch 多字段。 | — |
+| 7 | bulkRun 并发上限（Perf#3） | 无界 `Promise.all` → 并发 4 的 worker 池 + `x/N done` 进度。 | — |
+| 8 | e2e 上 CI（测试） | 独立 job，单 `ubuntu-latest` + Python 3.12；`playwright install --with-deps chromium` + `make test-e2e`。 | ci.yml YAML 校验 |
+| 9 | 基础加固（安全） | `MAX_BODY_BYTES` 413；`_is_loopback_host` / `_check_origin` 非 loopback Host 403；配置 `OSError` 降级；`resolve_int_setting` 校验端口/深度。 | 对应单测 |
+| 10 | 主题 title i18n / 默认语言 | 默认 `lang` 取 `navigator.language`；theme title 加 i18n STR。 | — |
+| 11 | diff 未跟踪文件转义（安全#5）+ 持久 executor（Arch#6） | `get_diff` 用 `--porcelain -z` 取未跟踪路径；模块级 `ThreadPoolExecutor`。 | get_diff/untracked 测试 |
+| 12 | 文档 | README "Zero/single-HTML" 措辞 → "Near-zero dependencies"。 | — |
+| 13 | SSE 队列上界 | `queue.Queue(maxsize=MAX_SSE_QUEUE_EVENTS=1024)` 加背压上界，避免无消费者时事件无限积压。 | test_pull_all_job_queue_is_bounded |
+| 14 | `/login` 失败限流 | 每客户端滚动窗口（60s 内最多 5 次失败）后返回 429；成功登录清空计数。 | test_login_rate_limits / resets |
+| 15 | 模态框焦点陷阱 | 既有实现确认到位（Tab 循环 + 返回焦点，T-043，本会话核对）。 | — |
+| 16 | 批量操作 pending 指示 | bulkRun 运行期间禁用 `#batchActions` 按钮（可见 pending + 防重复触发）。 | node --check |
+| 17 | `SECURITY.md` token↔cookie | Security Model 补：launch token 一次性兑换签名 HttpOnly 会话 cookie，永不进 API、离开地址栏/历史。 | — |
+| 18 | `SECURITY.md` discard=stash | Security Model 注明 discard 为可恢复的 `git stash push -u`（`harbor:discard <ts>`），可 `stash apply` 撤回。 | — |
+| 19 | Makefile `e2e-setup --with-deps` | 与 CI 行为一致，1 行。 | (`make test-e2e`) |
+
+---
+
+## 三、剩余任务 🕐
+
+### 高优先级
+
+- [ ] **H1. e2e 上 CI**
+  状态：✅ **已完成**（见二.#8，2025 由本清单采纳）。
+  遗留可选瘦身：若 CI 分钟紧张，可只跑关键 e2e（登录/discard/批量）或改 `workflow_dispatch` 手动触发。
+
+### 中优先级
+
+- [ ] **M1. 全量 `git status` 轮询 + 同步 rescan（Perf#1/#2）**
+  - 现状：依赖扫描仍有同步阻塞；是最重的遗留项。
+  - 成本/风险：改动面大、风险高；需分步做并保住 181 测试。
+  - 建议：拆分小步（先轮询后 rescan），每步可验证。
+
+- [ ] **M2. 模块级全局状态解耦（Arch#1）**
+  - 现状：`server.py`/`git.py` 用模块全局（executor、SESSION_SECRET、AUTH_TOKEN、state）。
+  - 说明：cookie 认证已为持久 secret 打好基础，完整解耦是一次中等规模重构。
+
+- [ ] **M3. diff 大渲染虚拟化（Perf#3）**
+  - 现状：超大 diff 一次进 DOM 会卡。
+  - 成本：独立、可逆；滚动虚拟化，中等成本。**低风险，适合优先做。**
+
+- [ ] **M4. DNS rebinding 加固（安全）**
+  - 现状：Origin 检查可被"恶意域名解析到 127.0.0.1"绕过。
+  - 方向：CSP 窗口/帧隔离，或校验 `Host` 必须为 loopback。
+
+### 低优先级
+
+- [ ] **L1. mypy strict**
+  现状：`pyproject.toml` `strict=false`；Makefile 里 mypy 是 `|| echo skipped` 的信息性检查，不卡 CI。
+
+- [ ] **L2. `requires-python` 上界**
+  现状：`>=3.10,<3.15`；待 3.15 发布后验证，或选择接受放宽上界。
+
+- [x] **L3. 小项集合 —— ✅ 全部完成（见二.#13–19）**
+
+---
+
+## 四、关键决策记录
+
+| 主题 | 决策 | 理由 |
+|---|---|---|
+| API 认证 | 会话 cookie（不用 Bearer/首 token） | token 进 URL 会泄漏进日志/历史；cookie 更贴近普通浏览器安全模型 |
+| discard | `git stash push -u`（可恢复）而非 `checkout -- . && clean -fd` | 提供撤回路径；保留"离开工作区"效果 |
+| bulkRun 并发 | 客户端 worker 池（并发 4）+ 进度 | 低成本解决无上限/乱序；不强上服务端 SSE job 引擎 |
+| e2e CI | 独立 job，单 Linux + 单 Python | e2e 测浏览器行为，与版本/OS 无关；避免矩阵重复 |
+| `_parse_args` | 既有“无子命令→serve”启发式 + `--` 转义 | argparse 无法简洁表达“子命令 XOR 默认 serve”；最小改动 |
+| `/login` 限流 | 每客户端滚动窗口计数（60s / 5 次）后 429，成功后清零 | 单机本地工具，按客户端维度即可；无需全局/分布式锁 |
+| SSE 队列 | 有界 `Queue(maxsize=1024)` 提供背压而非无限积压 | 无消费者时不再无界占用内存；worker 为 daemon 线程，阻塞不影响进程退出 |
+
+---
+
+## 五、验证基线命令
+
+```bash
+# 非 e2e
+PYTHONPATH=src python -m pytest tests/ -q -m 'not e2e'
+# e2e（需 Chrome）
+PYTHONPATH=src python -m pytest tests/e2e/ -m e2e --browser chromium
+# lint
+ruff check src/ tests/
+node --check src/harbor/static/harbor-utils.js
+node tests/frontend/test-utils.js
+```

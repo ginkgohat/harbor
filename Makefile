@@ -39,8 +39,10 @@ dev:  ## Install in development mode with dev extras (requires pip)
 
 e2e-setup:  ## Install the Chromium build Playwright drives (pip can't manage it)
 	@# Idempotent and offline once installed (~0.5s), so test-e2e depends on it:
-	@# `make dev` alone leaves the browser missing and the e2e run fails.
-	$(PYTHON) -m playwright install chromium
+	@# `make dev` alone leaves the browser missing and the e2e run fails.  The
+	@# --with-deps flag matches the CI workflow (which needs the system libraries
+	@# Chromium links against) so local and CI behavior stay consistent.
+	$(PYTHON) -m playwright install --with-deps chromium
 
 # ---------------------------------------------------------------------------
 # Run

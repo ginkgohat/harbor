@@ -552,6 +552,51 @@ def test_post_login_issues_cookie(tmp_path):
     assert "set-cookie: harbor_session=" in set_cookie
 
 
+def _post_login(token, host="127.0.0.1:8765"):
+    """POST /login with the given token and return (status, body)."""
+    h = _make_handler(
+        "POST",
+        "/login",
+        body=json.dumps({"token": token}).encode(),
+        headers={"Host": host, "Content-Type": "application/json"},
+    )
+    h.do_POST()
+    return _read_response(h)
+
+
+def test_login_rate_limits_repeated_failures(tmp_path):
+    """Too many consecutive failed /login attempts are throttled with 429."""
+    _enable_auth()
+    try:
+        server._LOGIN_FAILURES.clear()
+        for i in range(server.LOGIN_MAX_FAILURES):
+            status, _ = _post_login("wrong")
+            assert status == 401, f"attempt {i + 1} should be 401, got {status}"
+        # Budget exhausted → the next attempt is refused outright.
+        status, body = _post_login("wrong")
+        assert status == 429
+        assert "too many" in body["error"].lower()
+    finally:
+        server._LOGIN_FAILURES.clear()
+
+
+def test_login_success_resets_attempt_counter(tmp_path):
+    """A successful login clears prior failure history (no stale throttle)."""
+    _enable_auth()
+    try:
+        server._LOGIN_FAILURES.clear()
+        status, _ = _post_login("wrong")
+        assert status == 401
+        status, body = _post_login("launch-123")
+        assert status == 200, f"login should succeed, got {status}: {body}"
+        # Counter reset → a fresh run of failures starts from zero again.
+        for _ in range(server.LOGIN_MAX_FAILURES):
+            assert _post_login("wrong")[0] == 401
+        assert _post_login("wrong")[0] == 429
+    finally:
+        server._LOGIN_FAILURES.clear()
+
+
 def _read_response_head(handler):
     """Return (status_line, full_header_block) from a handler's wfile."""
     raw = handler.wfile.getvalue()
@@ -729,6 +774,20 @@ def test_pull_all_job_emits_done_on_clean_run():
     # "done" event, the consumer is the one that pops the entry.  We
     # verify the entry still exists; an SSE-driven test would also pop it.
     assert job_id in server.JOBS
+
+
+def test_pull_all_job_queue_is_bounded():
+    """The pull-all SSE event queue has a finite maxsize (backpressure cap).
+
+    A bounded queue bounds memory even with a huge root tree and no SSE
+    consumer draining events; the bound is positive and finite."""
+    job_id = server.start_pull_all_job({})
+    try:
+        q = server.JOBS[job_id]["queue"]
+        assert q.maxsize == server.MAX_SSE_QUEUE_EVENTS
+        assert q.maxsize > 0
+    finally:
+        server.JOBS.pop(job_id, None)
 
 
 def _drain_queue(job_id, timeout=2.0):
