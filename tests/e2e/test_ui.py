@@ -361,10 +361,9 @@ def test_diff_preview_opens_and_shows_content(page, server_url):
     assert diff_overlay.evaluate("el => el.classList.contains('show')")
 
     # Diff body should load (wait for fetch + render)
-    page.wait_for_selector("#diffBody .d-line", timeout=5000)
-    # At least some diff lines
-    lines = page.locator("#diffBody .d-line")
-    assert lines.count() > 0
+    page.wait_for_selector("#diffBody .d-pre", timeout=5000)
+    pre = page.locator("#diffBody .d-pre")
+    assert pre.text_content() != ""
     # Title should show the repo name
     assert page.locator("#diffTitle").text_content() != ""
 

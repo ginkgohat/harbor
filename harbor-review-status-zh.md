@@ -11,8 +11,8 @@
 
 | | 数量 |
 |---|---|
-| ✅ 已完成 | 19 |
-| 🕐 剩余待办 | 6 组（中 4 / 低 2；高已清） |
+| ✅ 已完成 | 21 |
+| 🕐 剩余待办 | 4 组（中 2 / 低 2；较高已清） |
 | 基线 | 本地：184 测试（162 非 e2e + 22 e2e）全绿；ruff 干净；前端 JS 34 通过 |
 | CI | `lint` / `build` / `test`（5 矩阵）/ `e2e`（单 Linux + py3.12） |
 
@@ -41,6 +41,8 @@
 | 17 | `SECURITY.md` token↔cookie | Security Model 补：launch token 一次性兑换签名 HttpOnly 会话 cookie，永不进 API、离开地址栏/历史。 | — |
 | 18 | `SECURITY.md` discard=stash | Security Model 注明 discard 为可恢复的 `git stash push -u`（`harbor:discard <ts>`），可 `stash apply` 撤回。 | — |
 | 19 | Makefile `e2e-setup --with-deps` | 与 CI 行为一致，1 行。 | (`make test-e2e`) |
+| 20 | diff 大渲染（Perf#6） | `openDiff` 改用单个 `<pre>` + 一次 `textContent` 写入，替代逐行至多 5000 个 `<div>`（一次性 long-task → 单文本节点）；换取单色，changed 行数保留在副标题。移除内联 `diffLineClass`。 | e2e `test_diff`、node --check |
+| 21 | DNS rebinding（安全#2） | 完成项 #9 的 `_is_loopback_host` Host 校验本已阻塞非回环 Host（rebinding 下 Host=攻击者域名 → 403），是核心防线；SECURITY.md 补边界说明 + 既有测试佐证。 | `test_is_loopback_host` / `test_mutating_request_rejects_non_loopback_host` |
 
 ---
 
@@ -63,13 +65,11 @@
   - 现状：`server.py`/`git.py` 用模块全局（executor、SESSION_SECRET、AUTH_TOKEN、state）。
   - 说明：cookie 认证已为持久 secret 打好基础，完整解耦是一次中等规模重构。
 
-- [ ] **M3. diff 大渲染虚拟化（Perf#3）**
-  - 现状：超大 diff 一次进 DOM 会卡。
-  - 成本：独立、可逆；滚动虚拟化，中等成本。**低风险，适合优先做。**
+- [x] **M3. diff 大渲染虚拟化（Perf#3）—— ✅ 已完成（见二.#20，选轻量方案：`<pre>`+`textContent` 单文本节点，放弃逐行高亮；全局无需完整虚拟滚动）**
 
-- [ ] **M4. DNS rebinding 加固（安全）**
+- [x] **M4. DNS rebinding 加固（安全）—— ✅ 已完成（见二.#21）**
   - 现状：Origin 检查可被"恶意域名解析到 127.0.0.1"绕过。
-  - 方向：CSP 窗口/帧隔离，或校验 `Host` 必须为 loopback。
+  - 结论：已由 `_is_loopback_host` Host 校验（#9 副作用）堵住；SECURITY.md 已补边界，确认既有测试。
 
 ### 低优先级
 

@@ -428,10 +428,10 @@ body.term-open main { padding-bottom: 260px; }
     background: var(--diff-bg);
   }
   #diffBody .d-line { padding: 0 18px; white-space: pre-wrap; word-break: break-all; }
-  #diffBody .d-add { background: var(--success-soft); color: var(--success); }
-  #diffBody .d-del { background: var(--danger-soft); color: var(--danger); }
   #diffBody .d-hunk { color: var(--accent); font-weight: 600; margin-top: 6px; }
-  #diffBody .d-meta { color: var(--faint); }
+  #diffBody .d-pre { margin: 0; padding: 8px 18px; white-space: pre; overflow-x: auto;
+    tab-size: 4; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text); }
   #diffBody .d-empty { color: var(--muted); text-align: center; padding: 40px 0; }
 
   /* ---------- terminal drawer ---------- */
@@ -1552,19 +1552,7 @@ document.addEventListener("click", async (e) => {
 // (The server additionally truncates the payload itself — T-041.)
 const MAX_DIFF_LINES = 5000;
 
-function diffLineClass(line) {
-  if (line.startsWith("diff --git") || line.startsWith("index ")) return "d-meta";
-  if (line.startsWith("+++") || line.startsWith("---")) return "d-meta";
-  if (line.startsWith("@@")) { diffLineClass._inHunk = true; return "d-hunk"; }
-  if (diffLineClass._inHunk) {
-    if (line.startsWith("+")) return "d-add";
-    if (line.startsWith("-")) return "d-del";
-  }
-  return "";
-}
-
 async function openDiff(name, path) {
-  diffLineClass._inHunk = false;
   $("#diffTitle").textContent = name;
   $("#diffSub").textContent = t("diffLoading");
   $("#diffUntracked").classList.remove("show");
@@ -1598,8 +1586,15 @@ async function openDiff(name, path) {
   if (data.truncated) notices.push(t("diffTruncated"));
   if (tooMany) notices.push(t("diffTooManyLines", MAX_DIFF_LINES));
   const noticeHtml = notices.map(n => `<div class="d-line d-hunk">${escHTML(n)}</div>`).join("");
-  $("#diffBody").innerHTML = noticeHtml + lines.map(line =>
-    `<div class="d-line ${diffLineClass(line)}">${escHTML(line) || "&nbsp;"}</div>`).join("");
+  // Cheap large-diff render: a single <pre> written once via textContent — one
+  // DOM text node instead of up to 5000 line-<div>s, so a big diff no longer
+  // blocks layout with one long innerHTML insert.  This trades per-line +/−
+  // coloring for speed; the changed-line count stays in the dialog subtitle.
+  const pre = document.createElement("pre");
+  pre.className = "d-pre";
+  pre.textContent = lines.join("\n");
+  $("#diffBody").innerHTML = noticeHtml;
+  $("#diffBody").appendChild(pre);
 }
 
 $("#diffClose").addEventListener("click", () => $("#diffOverlay").classList.remove("show"));

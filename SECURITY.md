@@ -57,8 +57,13 @@ Harbor is designed as a **local-only** tool:
   deliberate tradeoff: putting a credential in the URL leaks it into logs and
   history, so the credential moves to a cookie as soon as the browser can take
   ownership of it.
-- Cross-origin POST requests are rejected via Origin/Referer checks; when auth
-  is enabled the HTTP `Host` header must name a loopback endpoint.
+- Cross-origin mutation requests are rejected via Origin/Referer checks, and the
+  HTTP `Host` header must name a loopback endpoint regardless of auth.  Requiring
+  a loopback `Host` name (`127.0.0.1`, `localhost`, `[::1]`) is the defense
+  against **DNS rebinding**: a malicious domain that resolves to 127.0.0.1 would
+  still present a non-loopback `Host` (its own name) and is rejected rather than
+  trusted.  (Attacker-domain `Host` + matching `Origin` is exercised by
+  `test_mutating_request_rejects_non_loopback_host`.)
 - Destructive operations (discard, checkout, stash drop) require UI
   confirmation.  `discard` is **recoverable**: it runs `git stash push -u`
   (tagged `harbor:discard <timestamp>`) instead of destroying changes, so the
