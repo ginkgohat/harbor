@@ -5,19 +5,22 @@ class attributes, which forced tests to snapshot/restore the class after
 every test and made it impossible to run more than one Harbor instance in
 the same process.
 
-The :class:`AppState` dataclass owns *all* mutable configuration and repo
-state.  A single instance is constructed in ``__main__.py`` and injected
-into the handler via a module-level attribute (``server.app_state``).
+The :class:`HarborApp` dataclass owns *all* mutable application state:
+configuration, repo records, authentication (launch token + session-signing
+secret), pull-all jobs, and login throttling.  A single instance is
+constructed in ``__main__.py`` and injected into the handler via a module-level
+attribute (``server.app_state``).
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 
 @dataclass
-class AppState:
+class HarborApp:
     """Mutable application state shared across HTTP handler instances.
 
     Attributes:
@@ -30,8 +33,18 @@ class AppState:
         max_depth: Maximum directory depth for repo scanning.
         cli_min_depth: When set, overrides ``min_depth`` from config file.
         cli_max_depth: When set, overrides ``max_depth`` from config file.
+        auth_token: The launch token (one-time entry credential).  ``None``
+            disables authentication (tests / no-auth mode).
+        session_secret: HMAC key that signs web-session cookies.  ``None``
+            disables cookie signing (tests / no-auth mode).
+        jobs: Pull-all SSE jobs keyed by job id; each value is a ``_Job``
+            dict ``{"queue": Queue, "created": float}``.
+        jobs_lock: Guards ``jobs``.
+        login_failures: Per-client failed-login timestamps (throttling).
+        login_lock: Guards ``login_failures``.
     """
 
+    # --- configuration / repo state ---
     repos: dict[str, dict[str, Any]] = field(default_factory=dict)
     roots: list[tuple[str, str]] = field(default_factory=list)
     html_path: str = ""
@@ -43,3 +56,15 @@ class AppState:
     # CLI args take priority and aren't hot-reloaded from config file.
     cli_min_depth: int | None = None
     cli_max_depth: int | None = None
+
+    # --- authentication ---
+    auth_token: str | None = None
+    session_secret: bytes | None = None
+
+    # --- pull-all jobs ---
+    jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    jobs_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # --- login throttling ---
+    login_failures: dict[str, list[float]] = field(default_factory=dict)
+    login_lock: threading.Lock = field(default_factory=threading.Lock)

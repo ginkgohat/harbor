@@ -807,30 +807,38 @@ def test_create_server_success():
 
 
 # ---------------------------------------------------------------------------
-# T-030 — AppState dataclass
+# T-030 — HarborApp dataclass
 # ---------------------------------------------------------------------------
 
 
 def test_app_state_defaults():
-    from harbor.state import AppState
+    from harbor.state import HarborApp
 
-    state = AppState()
+    state = HarborApp()
     assert state.repos == {}
     assert state.config_path == ""
     assert state.min_depth == 1
     assert state.max_depth == 5
     assert state.cli_min_depth is None
     assert state.cli_max_depth is None
+    assert state.auth_token is None
+    assert state.session_secret is None
+    assert state.jobs == {}
+    assert state.login_failures == {}
 
 
 def test_app_state_is_independent():
-    """Two AppState instances don't share mutable defaults."""
-    from harbor.state import AppState
+    """Two HarborApp instances don't share mutable defaults."""
+    from harbor.state import HarborApp
 
-    a = AppState()
-    b = AppState()
+    a = HarborApp()
+    b = HarborApp()
     a.repos["/x"] = {"name": "x"}
+    a.jobs["j"] = {"queue": object(), "created": 0.0}
+    a.login_failures["127.0.0.1"] = [1.0]
     assert b.repos == {}
+    assert b.jobs == {}
+    assert b.login_failures == {}
 
 
 # ---------------------------------------------------------------------------

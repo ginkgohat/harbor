@@ -23,7 +23,7 @@ from urllib.parse import ParseResult, parse_qs, unquote, urlparse
 from . import config as config_mod
 from . import git as git_ops
 from . import scanner as scanner_mod
-from .state import AppState
+from .state import HarborApp
 
 logger = logging.getLogger(__name__)
 
@@ -35,30 +35,10 @@ class _Job(TypedDict):
     created: float
 
 
-# Module-level application state — populated by __main__ at startup.
-# Tests can also set this directly to avoid touching class attributes.
-app_state: AppState = AppState()
-
-JOBS_LOCK = threading.Lock()
-JOBS: dict[str, _Job] = {}
-
-# Authentication token — set at startup by __main__.
-# When set (not None), every API and SSE request must include ?token=<value>
-# or it gets a 403.  Static assets and the root HTML page are always
-# accessible (the HTML page itself carries the token in its URL query).
-#
-# This protects against CSRF, DNS rebinding, and random local processes
-# discovering the port and calling destructive endpoints (discard, etc.).
-# Launch token — the single-use entry credential printed / opened at startup
-# (``/?token=<launch>``).  It is ONLY accepted for the one-time exchange that
-# turns it into a signed session cookie (see ``_get_index``); the launch token
-# itself is never accepted by API/SSE routes (see ``_check_token``).
-AUTH_TOKEN: str | None = None
-
-# HMAC key used to sign web-session cookies.  Persisted across restarts (see
-# __main__.py) so a browser's cookies survive a server restart.  ``None`` here
-# means the signing feature is disabled (used by tests for unauth'd requests).
-SESSION_SECRET: bytes | None = None
+# The single application-state object, populated by __main__ at startup and
+# reset per test.  Every mutable bit of state (config, auth, jobs, login
+# throttling) lives on this one object — see :class:`HarborApp` in state.py.
+app_state: HarborApp = HarborApp()
 
 # Signed cookie that authenticates every fetch/SSE request (browsers send it
 # same-origin automatically, so the token no longer needs to appear in URLs).
@@ -67,8 +47,8 @@ SESSION_MAX_AGE_DAYS = 30
 _SESSION_SEP = "|"  # separator inside the signed payload; never in host:port
 
 # A job whose SSE consumer never read its "done" event (client disconnect)
-# would otherwise sit in JOBS forever.  Sweep entries older than this TTL
-# lazily, whenever a new job is started.
+# would otherwise sit in app_state.jobs forever.  Sweep entries older than
+# this TTL lazily, whenever a new job is started.
 JOB_TTL_SECONDS = 3600
 
 MAX_WORKERS = 8
@@ -83,10 +63,9 @@ MAX_BODY_BYTES = 1024 * 1024
 # but a local process could still probe the login endpoint repeatedly; bound how
 # many failed attempts a client may make within a rolling window before the
 # endpoint refuses (429) and forces a pause.  A successful login resets it.
+# Attempt history lives on app_state.login_failures (guarded by login_lock).
 LOGIN_WINDOW_SECONDS = 60.0
 LOGIN_MAX_FAILURES = 5
-_LOGIN_LOCK = threading.Lock()
-_LOGIN_FAILURES: dict[str, list[float]] = {}
 
 # Upper bound on the in-flight event buffer of a pull-all SSE job.  pull_one
 # emits a small fixed number of events per repo, but a huge root tree with no
@@ -136,11 +115,11 @@ def _get_index(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) 
     """Serve the app.  A request to ``/?token=<launch>`` performs the one-time
     launch-token exchange: issue a signed session cookie, then redirect to the
     clean ``/`` so the token leaves the address bar and browser history."""
-    if AUTH_TOKEN is not None:
+    if app_state.auth_token is not None:
         qs = parse_qs(parsed.query)
         tokens = qs.get("token")
         launch = tokens[0] if tokens else None
-        if launch and SESSION_SECRET is not None and launch == AUTH_TOKEN:
+        if launch and app_state.session_secret is not None and launch == app_state.auth_token:
             host = self.headers.get("Host", "")
             self.send_response(302)
             self._set_session_cookie(_normalize_hostport(host))
@@ -162,7 +141,7 @@ def _post_login(
     local process can't brute-force the launch token."""
     # Rate-limit bookkeeping happens before parsing the body so a flood of
     # attempts can't even reach the token comparison.
-    if AUTH_TOKEN is not None and _login_throttled(self.client_address[0]):
+    if app_state.auth_token is not None and _login_throttled(self.client_address[0]):
         self._send_json(
             429, {"ok": False, "error": "too many attempts, try again later"}
         )
@@ -174,14 +153,14 @@ def _post_login(
         qs = parse_qs(body or "")
         token = (qs.get("token") or [""])[0].strip()
 
-    if AUTH_TOKEN is None or token == AUTH_TOKEN:
+    if app_state.auth_token is None or token == app_state.auth_token:
         _login_success(self.client_address[0])
         self._send_json(
             200,
             {"ok": True, "redirect": "/"},
             set_cookie=(
                 _normalize_hostport(self.headers.get("Host", ""))
-                if SESSION_SECRET is not None
+                if app_state.session_secret is not None
                 else None
             ),
         )
@@ -366,7 +345,7 @@ def _new_session_cookie(hostport: str) -> str:
     """
     exp = int(time.time()) + SESSION_MAX_AGE_DAYS * 86400
     payload = f"{exp}{_SESSION_SEP}{hostport}".encode()
-    secret = SESSION_SECRET
+    secret = app_state.session_secret
     if secret is None:
         raise RuntimeError("session signing secret not configured")
     sig = hmac.new(secret, payload, hashlib.sha256).hexdigest()
@@ -378,7 +357,7 @@ def _valid_session_cookie(value: str, hostport: str) -> bool:
     """Validate a session cookie's signature, expiry, and host:port binding."""
     if not value:
         return False
-    if SESSION_SECRET is None:
+    if app_state.session_secret is None:
         # Signing disabled — accept anything (tests / no-auth mode).
         return True
     try:
@@ -388,7 +367,7 @@ def _valid_session_cookie(value: str, hostport: str) -> bool:
     except (ValueError, TypeError, binascii.Error, UnicodeDecodeError):
         return False
     good_sig = hmac.compare_digest(
-        sig, hmac.new(SESSION_SECRET, payload, hashlib.sha256).hexdigest()
+        sig, hmac.new(app_state.session_secret, payload, hashlib.sha256).hexdigest()
     )
     if not good_sig:
         return False
@@ -415,27 +394,27 @@ def _extract_cookie(header: str, name: str) -> str | None:
 def _login_throttled(addr: str) -> bool:
     """Return True if *addr* has exhausted its login attempt budget.
 
-    Keeps ``_LOGIN_FAILURES`` trimmed to a rolling window so staleness never
+    Keeps ``app_state.login_failures`` trimmed to a rolling window so staleness never
     accumulates unboundedly."""
-    with _LOGIN_LOCK:
+    with app_state.login_lock:
         now = time.monotonic()
         keep = [
-            t for t in _LOGIN_FAILURES.get(addr, []) if now - t < LOGIN_WINDOW_SECONDS
+            t for t in app_state.login_failures.get(addr, []) if now - t < LOGIN_WINDOW_SECONDS
         ]
-        _LOGIN_FAILURES[addr] = keep
+        app_state.login_failures[addr] = keep
         return len(keep) >= LOGIN_MAX_FAILURES
 
 
 def _login_failure(addr: str) -> None:
     """Record a failed login so the next attempt counts toward throttling."""
-    with _LOGIN_LOCK:
-        _LOGIN_FAILURES.setdefault(addr, []).append(time.monotonic())
+    with app_state.login_lock:
+        app_state.login_failures.setdefault(addr, []).append(time.monotonic())
 
 
 def _login_success(addr: str) -> None:
     """Clear attempt history on a successful login."""
-    with _LOGIN_LOCK:
-        _LOGIN_FAILURES.pop(addr, None)
+    with app_state.login_lock:
+        app_state.login_failures.pop(addr, None)
 
 
 def _outcome_http_code(outcome: git_ops.ActionOutcome) -> int:
@@ -462,16 +441,16 @@ def _browse_dir(path: str) -> dict[str, Any]:
 def _sweep_stale_jobs() -> int:
     """Drop jobs older than JOB_TTL_SECONDS.  Returns how many were swept."""
     now = time.monotonic()
-    with JOBS_LOCK:
+    with app_state.jobs_lock:
         stale = [
             jid
-            for jid, job in JOBS.items()
+            for jid, job in app_state.jobs.items()
             if now - job.get("created", now) > JOB_TTL_SECONDS
         ]
         for jid in stale:
-            JOBS.pop(jid, None)
+            app_state.jobs.pop(jid, None)
     if stale:
-        logger.info("swept %d stale job(s) from JOBS", len(stale))
+        logger.info("swept %d stale job(s) from the pull-all table", len(stale))
     return len(stale)
 
 
@@ -480,8 +459,8 @@ def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
     _sweep_stale_jobs()
     job_id = uuid.uuid4().hex
     q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=MAX_SSE_QUEUE_EVENTS)
-    with JOBS_LOCK:
-        JOBS[job_id] = {"queue": q, "created": time.monotonic()}
+    with app_state.jobs_lock:
+        app_state.jobs[job_id] = {"queue": q, "created": time.monotonic()}
 
     def worker() -> None:
         try:
@@ -509,7 +488,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for the Harbor web UI.
 
     All mutable state lives in the module-level :data:`app_state`
-    (:class:`AppState`) instead of class attributes, so tests can reset
+    (:class:`HarborApp`) instead of class attributes, so tests can reset
     state cleanly and multiple instances share the same state naturally.
     """
 
@@ -613,8 +592,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if job_id is None:
             self.send_error(404)
             return
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
+        with app_state.jobs_lock:
+            job = app_state.jobs.get(job_id)
         if not job:
             self.send_error(404)
             return
@@ -640,8 +619,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
             if item.get("done"):
-                with JOBS_LOCK:
-                    JOBS.pop(job_id, None)
+                with app_state.jobs_lock:
+                    app_state.jobs.pop(job_id, None)
                 return
 
     # ------------------------------------------------------------------
@@ -698,7 +677,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         entry credential exchanged for the cookie on ``/`` and must never
         authenticate API/SSE routes directly.
         """
-        if AUTH_TOKEN is None and SESSION_SECRET is None:
+        if app_state.auth_token is None and app_state.session_secret is None:
             return True
         if self._is_static_or_root(parsed):
             return True

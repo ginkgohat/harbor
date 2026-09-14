@@ -29,7 +29,7 @@ from . import scanner as scanner_mod
 from . import selfmanage as selfmanage_mod
 from . import server as server_mod
 from .server import Handler
-from .state import AppState
+from .state import HarborApp
 
 logger = logging.getLogger(__name__)
 
@@ -330,8 +330,8 @@ def _run_server(args: argparse.Namespace) -> int:
         logger.error("index.html not found at %s", html_path)
         sys.exit(1)
 
-    # --- Configure handler (AppState) ----------------------------------
-    state = AppState(
+    # --- Configure handler (HarborApp) ----------------------------------
+    state = HarborApp(
         repos=repos,
         roots=roots,
         html_path=html_path,
@@ -350,7 +350,7 @@ def _run_server(args: argparse.Namespace) -> int:
     # T-011: generate a random token and include it in the URL.
     # Protects against CSRF, DNS rebinding, and local process attacks.
     token = secrets.token_urlsafe(16)
-    server_mod.AUTH_TOKEN = token
+    state.auth_token = token
 
     # Write PID + token to state files so `harbor status` works for both
     # foreground and daemon mode.  In daemon mode the PID file was already
@@ -373,7 +373,7 @@ def _run_server(args: argparse.Namespace) -> int:
         # survive restarts; if the file can't be written we still fall back to
         # an in-memory secret so the current run keeps working.
         if _daemon_mod.SESSION_SECRET_FILE.exists():
-            server_mod.SESSION_SECRET = _daemon_mod.SESSION_SECRET_FILE.read_bytes()
+            state.session_secret = _daemon_mod.SESSION_SECRET_FILE.read_bytes()
         else:
             secret = os.urandom(32)
             import contextlib
@@ -391,7 +391,7 @@ def _run_server(args: argparse.Namespace) -> int:
             except OSError:
                 # Non-fatal — fall back to the in-memory secret.
                 pass
-            server_mod.SESSION_SECRET = secret
+            state.session_secret = secret
         # Clean up both on exit (works for foreground mode; daemon mode
         # already has its own atexit handler registered in daemon.py).
         atexit.register(_daemon_mod._remove_pid)

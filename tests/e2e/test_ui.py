@@ -24,7 +24,7 @@ import pytest
 from harbor import config as config_mod
 from harbor import scanner as scanner_mod
 from harbor import server as server_mod
-from harbor.state import AppState
+from harbor.state import HarborApp
 
 pytestmark = pytest.mark.e2e
 
@@ -90,9 +90,7 @@ def server_url(tmp_path):
     static_dir = os.path.join(os.path.dirname(server_mod.__file__), "static")
     html_path = os.path.join(static_dir, "index.html")
     saved_state = server_mod.app_state
-    saved_token = server_mod.AUTH_TOKEN
-    saved_secret = server_mod.SESSION_SECRET
-    server_mod.app_state = AppState(
+    server_mod.app_state = HarborApp(
         repos=repos,
         roots=[(str(tmp_path), "test")],
         html_path=html_path,
@@ -100,10 +98,10 @@ def server_url(tmp_path):
         config_path=str(config_path),
         min_depth=1,
         max_depth=3,
+        # Launch token + signing key, as __main__.py would set them.
+        auth_token="test-token-123",
+        session_secret=b"e2e-session-secret-16-bytes!!",
     )
-    server_mod.AUTH_TOKEN = "test-token-123"
-    # Signing key for the session cookie (as __main__.py would set it).
-    server_mod.SESSION_SECRET = b"e2e-session-secret-16-bytes!!"
 
     port = _free_port()
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), server_mod.Handler)
@@ -126,8 +124,6 @@ def server_url(tmp_path):
 
     httpd.shutdown()
     server_mod.app_state = saved_state
-    server_mod.AUTH_TOKEN = saved_token
-    server_mod.SESSION_SECRET = saved_secret
 
 
 # ---------------------------------------------------------------------------
