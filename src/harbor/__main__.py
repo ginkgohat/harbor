@@ -345,6 +345,9 @@ def _run_server(args: argparse.Namespace) -> int:
     )
     # Share state with the server module (read by every Handler instance).
     server_mod.app_state = state
+    # Background repo-status refresher: /api/repos serves a cached snapshot
+    # instead of blocking on per-repo git subprocesses on every request.
+    server_mod.start_status_refresher(state)
 
     # --- Authentication token + PID file -------------------------------
     # T-011: generate a random token and include it in the URL.

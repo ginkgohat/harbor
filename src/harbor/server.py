@@ -186,7 +186,17 @@ def _get_favicon(
 
 @_route("GET", r"^/api/repos$")
 def _get_repos(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) -> None:
-    self._send_json(200, git_ops.get_repos_status(app_state.repos))
+    """Serve the cached status snapshot, recomputed in the background.
+
+    If the snapshot is empty but repos exist — first request before the
+    refresher's first tick, or a rescan just invalidated it — compute once on
+    demand so the UI never shows an empty list.
+    """
+    snapshot = app_state.repo_status
+    if not snapshot and app_state.repos:
+        snapshot = {s["path"]: s for s in git_ops.get_repos_status(app_state.repos)}
+        app_state.repo_status = snapshot
+    self._send_json(200, list(snapshot.values()))
 
 
 @_route("GET", r"^/api/roots$")
@@ -289,7 +299,14 @@ def _post_repo_action(
     if outcome.status == "ok":
         repo = app_state.repos.get(path)
         if repo is not None:
-            result["status"] = git_ops.repo_status(repo)
+            fresh = git_ops.repo_status(repo)
+            result["status"] = fresh
+            # Keep the background snapshot consistent so the next poll doesn't
+            # revert this card to its pre-action status.
+            if path in app_state.repo_status:
+                snapshot = dict(app_state.repo_status)
+                snapshot[path] = fresh
+                app_state.repo_status = snapshot
     self._send_json(http_code, result)
 
 
@@ -484,6 +501,57 @@ def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
     return job_id
 
 
+# ---------------------------------------------------------------------------
+# Background status refresh
+# ---------------------------------------------------------------------------
+
+# The frontend polls /api/repos every 30s while visible; the background
+# refresher recomputes statuses on the same cadence so every poll is a cheap
+# snapshot read instead of spawning one ``git status`` per repo per request.
+REFRESH_INTERVAL = 30.0
+
+
+def _refresh_once(app: HarborApp) -> None:
+    """Compute one fresh status snapshot for ``app.repos`` and swap it in.
+
+    The snapshot is swapped in only if the repo set didn't change while we
+    were computing (a rescan rebinds ``app.repos``, making a concurrent result
+    stale — the snapshot is dropped instead, and the next /api/repos falls
+    back to an on-demand compute).
+    """
+    repos = app.repos
+    try:
+        snapshot = {s["path"]: s for s in git_ops.get_repos_status(repos)}
+    except Exception:
+        # One bad iteration (a pathological repo) must not kill the
+        # refresher — log and retry next cycle.
+        logger.exception("status refresh failed; will retry")
+        snapshot = {}
+    app.repo_status = snapshot if app.repos is repos else {}
+
+
+def _refresh_loop(app: HarborApp) -> None:
+    """Background loop that keeps ``app.repo_status`` fresh.
+
+    Runs until the process exits (daemon thread).  Statuses are computed once
+    per interval for the whole repo set in the shared git executor, so every
+    /api/repos poll is a cheap snapshot read.
+    """
+    while True:
+        _refresh_once(app)
+        time.sleep(REFRESH_INTERVAL)
+
+
+def start_status_refresher(app: HarborApp) -> None:
+    """Start the background status-refresh daemon thread (idempotent)."""
+    if app.refresher is not None and app.refresher.is_alive():
+        return
+    app.refresher = threading.Thread(
+        target=_refresh_loop, args=(app,), daemon=True, name="status-refresher"
+    )
+    app.refresher.start()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for the Harbor web UI.
 
@@ -645,6 +713,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             max_depth=app_state.max_depth,
         )
         app_state.repos = new_repos
+        # The snapshot describes the old repo set — invalidate it so the next
+        # /api/repos recomputes fresh statuses for the new set (the refresher
+        # repopulates it on its next tick).
+        app_state.repo_status = {}
         return app_state.roots, new_repos
 
     # ------------------------------------------------------------------

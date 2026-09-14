@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import urllib.request
+from unittest.mock import patch
 from urllib.error import HTTPError
 
 import pytest
@@ -1153,3 +1154,125 @@ def test_sse_client_disconnect_leaves_job_for_sweep(monkeypatch, tmp_path):
         assert slow_job_id not in server.app_state.jobs
     finally:
         srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Perf#1 — cached status snapshot (background refresh)
+# ---------------------------------------------------------------------------
+
+
+def test_get_repos_serves_cached_snapshot():
+    """With a snapshot present, /api/repos serves it without recomputing."""
+    server.app_state.repos = {"fake": {"name": "fake", "path": "fake"}}
+    cached = [
+        {
+            "name": "fake",
+            "path": "fake",
+            "branch": "main",
+            "dirty": False,
+            "detached": False,
+            "is_main": True,
+            "ahead": None,
+            "behind": None,
+            "root_label": "",
+        }
+    ]
+    server.app_state.repo_status = {"fake": cached[0]}
+
+    with patch(
+        "harbor.server.git_ops.get_repos_status",
+        side_effect=AssertionError("must not recompute"),
+    ) as recompute:
+        h = _make_handler("GET", "/api/repos")
+        h.do_GET()
+        status, body = _read_response(h)
+    assert status == 200
+    assert body == cached
+    recompute.assert_not_called()
+
+
+def test_get_repos_falls_back_to_live_when_snapshot_empty():
+    """Empty snapshot + non-empty repos → compute on demand and cache it."""
+    server.app_state.repos = {"fake": {"name": "fake", "path": "fake"}}
+    live = [
+        {
+            "name": "fake",
+            "path": "fake",
+            "branch": "main",
+            "dirty": False,
+            "detached": False,
+            "is_main": True,
+            "ahead": None,
+            "behind": None,
+            "root_label": "",
+        }
+    ]
+
+    with patch("harbor.server.git_ops.get_repos_status", return_value=live) as m:
+        h = _make_handler("GET", "/api/repos")
+        h.do_GET()
+        status, body = _read_response(h)
+    assert status == 200
+    assert body == live
+    m.assert_called_once()
+    assert server.app_state.repo_status == {"fake": live[0]}
+
+
+def test_rescan_invalidates_snapshot(tmp_path):
+    """After a rescan swaps repos, the old status snapshot is dropped."""
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.roots = []
+    # Seed a stale snapshot from a previous repo set.
+    server.app_state.repo_status = {"stale": {"path": "stale", "dirty": True}}
+
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    status, _ = _read_response(h)
+    assert status == 200
+    assert server.app_state.repo_status == {}
+
+
+def test_repo_action_updates_cached_snapshot(tmp_path):
+    """After a successful action, the snapshot entry is refreshed, not stale."""
+    server.app_state.config_path = str(tmp_path / "config.toml")
+    server.app_state.repos = {"fake": {"name": "fake", "path": "fake"}}
+    server.app_state.repo_status = {
+        "fake": {"name": "fake", "path": "fake", "dirty": True}
+    }
+    fresh = {"name": "fake", "path": "fake", "dirty": False}
+    outcome = server.git_ops.ActionOutcome(ok=True, output="ok")
+
+    with patch("harbor.server.git_ops.do_action", return_value=outcome), patch(
+        "harbor.server.git_ops.repo_status", return_value=fresh
+    ):
+        h = _make_handler(
+            "POST", "/api/repo/fake/action", body=b'{"action":"pull"}'
+        )
+        h.do_POST()
+        status, body = _read_response(h)
+    assert status == 200
+    assert body["status"] == fresh
+    assert server.app_state.repo_status["fake"] == fresh
+
+
+def test_refresh_once_populates_snapshot():
+    """_refresh_once computes and caches statuses for the current repo set."""
+    app = HarborApp()
+    app.repos = {"fake": {"name": "fake", "path": "fake"}}
+    live = [{"name": "fake", "path": "fake", "dirty": False}]
+    with patch("harbor.server.git_ops.get_repos_status", return_value=live):
+        server._refresh_once(app)
+    assert app.repo_status == {"fake": live[0]}
+
+
+def test_refresh_once_discards_snapshot_when_repos_rebound():
+    """If repos is rebound mid-compute, the computed snapshot is discarded."""
+    app = HarborApp()
+    app.repos = {"old": {"name": "old", "path": "old"}}
+
+    def _rebind(repos):
+        app.repos = {"new": {"name": "new", "path": "new"}}
+
+    with patch("harbor.server.git_ops.get_repos_status", side_effect=_rebind):
+        server._refresh_once(app)
+    assert app.repo_status == {}

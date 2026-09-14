@@ -42,6 +42,9 @@ class HarborApp:
         jobs_lock: Guards ``jobs``.
         login_failures: Per-client failed-login timestamps (throttling).
         login_lock: Guards ``login_failures``.
+        repo_status: Cached repo status snapshot (path → status dict), kept
+            fresh in the background so /api/repos never blocks on git.
+        refresher: The daemon thread running the refresh loop, if started.
     """
 
     # --- configuration / repo state ---
@@ -68,3 +71,11 @@ class HarborApp:
     # --- login throttling ---
     login_failures: dict[str, list[float]] = field(default_factory=dict)
     login_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # --- background status snapshot ---
+    # repo path → status dict, recomputed in the background by the status
+    # refresher so /api/repos is a cheap cache read instead of spawning one
+    # `git status` per repo per request (see server.start_status_refresher).
+    repo_status: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The daemon thread running the refresh loop (None until started).
+    refresher: threading.Thread | None = None
