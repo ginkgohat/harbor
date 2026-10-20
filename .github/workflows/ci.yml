@@ -70,6 +70,46 @@ jobs:
       - name: Build and check package
         run: make build-check PYTHON=python
 
+  # Smoke-test the install path README documents:
+  #   pip install "git+https://github.com/ginkgohat/harbor.git"
+  # Packaging regressions (missing package data, a broken entry point, an
+  # unresolvable build-system pin) only surface on a *fresh* git install, not
+  # on the editable install every other job uses.  Installs the exact commit
+  # under test into a throwaway venv and runs the resulting `harbor` command.
+  #
+  # On pull_request events GITHUB_SHA is GitHub's ephemeral merge commit, which
+  # is not reachable from the clone refs pip fetches, so the PR's own head
+  # commit/repo is used instead; pushes use this repository and GITHUB_SHA.
+  install-git:
+    name: Install from git URL (smoke)
+    runs-on: ubuntu-latest
+    env:
+      INSTALL_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || format('https://github.com/{0}.git', github.repository) }}
+      INSTALL_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install into a clean venv from the documented git URL
+        run: |
+          python -m venv .venv-install
+          .venv-install/bin/python -m pip install --upgrade pip
+          .venv-install/bin/pip install "git+${INSTALL_REPO_URL}@${INSTALL_REF}"
+
+      - name: Verify the harbor CLI works
+        run: |
+          version="$(.venv-install/bin/harbor --version)"
+          echo "reported version: $version"
+          case "$version" in
+            harbor\ *) echo "OK: entry point and version metadata are present." ;;
+            *) echo "error: unexpected harbor --version output: $version" >&2; exit 1 ;;
+          esac
+
   test:
     name: Test (Python ${{ matrix.python-version }} / ${{ matrix.os }})
     needs: [lint]
