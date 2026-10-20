@@ -838,6 +838,9 @@ const STR = {
     btnPull: "Pull", btnStash: "Stash", btnDiscard: "丢弃", btnMain: "默认分支", btnPreview: "预览", btnVscode: "VSCode",
     refreshTip: "刷新配置",
     refreshDone: (n) => `已刷新 · ${n} 个 repo`,
+    scanningNow: "正在扫描…",
+    refreshPending: "仍在扫描，稍后自动更新",
+    refreshFailed: "刷新失败",
     batchStash: (n) => `Stash 全部 (${n})`,
     batchDiscard: (n) => `丢弃全部 (${n})`,
     batchMain: (n) => `切换全部到默认分支 (${n})`,
@@ -886,6 +889,9 @@ const STR = {
     btnPull: "Pull", btnStash: "Stash", btnDiscard: "Discard", btnMain: "default", btnPreview: "Preview", btnVscode: "VSCode",
     refreshTip: "Refresh config",
     refreshDone: (n) => `Refreshed · ${n} repos`,
+    scanningNow: "Scanning…",
+    refreshPending: "Still scanning — this will update automatically",
+    refreshFailed: "Refresh failed",
     batchStash: (n) => `Stash all (${n})`,
     batchDiscard: (n) => `Discard all (${n})`,
     batchMain: (n) => `Switch all to default branch (${n})`,
@@ -1154,26 +1160,80 @@ setTimeout(_initSyncedStripA11y, 100);
 
 
 /* ---------- refresh / rescan ---------- */
-// Scan generation seen in the most recent /api/repos response.  A background
-// rescan bumps it server-side; waitForScan() polls until it advances so the
-// UI updates only after the new repo set is actually published.
-let lastScanGen = 0;
+// The server identifies its process instance with an `epoch` and keeps two
+// monotonic counters: `X-Harbor-Scan-Gen` (completed scans) and
+// `X-Harbor-Scan-Done` (highest rescan request seq whose worker has finished,
+// success or failure).  Clicking refresh asks for a `scan_seq` and then polls
+// until `done >= scan_seq` — only then is the new repo set really published.
+// Comparing epochs detects a harbor restart, where the counters start over.
+let serverEpoch = "";
+let lastScanDone = 0;
+let loadSeq = 0;                 // loadRepos request seq (drop out-of-order responses)
+const SCAN_WAIT_MS = 30000;      // budget for one click-triggered rescan
 
-async function waitForScan(beforeGen, timeoutMs) {
+function readScanHeaders(res) {
+  const num = (name) => {
+    const v = parseInt(res.headers.get(name) || "0", 10);
+    return Number.isNaN(v) ? 0 : v;
+  };
+  const rawErr = res.headers.get("X-Harbor-Scan-Error");
+  let error = null;
+  if (rawErr) {
+    try { error = decodeURIComponent(rawErr); } catch (_) { error = rawErr; }
+  }
+  return {
+    gen: num("X-Harbor-Scan-Gen"),
+    done: num("X-Harbor-Scan-Done"),
+    epoch: res.headers.get("X-Harbor-Epoch") || "",
+    error,
+  };
+}
+
+async function waitForScan(scanSeq, epoch, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 250));
-    const res = await fetch(`/api/repos`, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) continue;
-    const gen = parseInt(res.headers.get("X-Harbor-Scan-Gen") || "0", 10);
-    if (!Number.isNaN(gen) && gen > beforeGen) {
-      repos = await res.json();
-      lastScanGen = gen;
-      render();
-      return repos.length;
+    let res;
+    try {
+      res = await fetch(`/api/repos`, { signal: AbortSignal.timeout(10000) });
+    } catch (_) {
+      continue;  // transient failure — a slow /api/repos must not abort the wait
     }
+    if (!res.ok) continue;
+    const h = readScanHeaders(res);
+    // A different epoch means the server restarted under us; the scan_seq we
+    // are waiting for belongs to the old process and will never complete.
+    if (epoch && h.epoch && h.epoch !== epoch) return { restarted: true };
+    if (h.done < scanSeq) continue;
+    if (h.error) return { error: h.error };
+    let body;
+    try {
+      body = await res.json();
+    } catch (_) {
+      continue;  // malformed/incomplete body — retry on the next tick
+    }
+    repos = body;
+    serverEpoch = epoch;
+    lastScanDone = h.done;
+    render();
+    return { count: repos.length };
   }
   return null; // timed out — caller falls back to loadRepos()
+}
+
+// Briefly show a one-line message in the stats area, then restore it.
+let flashTimer = null;
+function flash(text) {
+  const stats = $("#stats");
+  if (!stats) return;
+  const original = stats.innerHTML;
+  stats.innerHTML = text;
+  if (flashTimer) clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    flashTimer = null;
+    stats.innerHTML = original;
+    render();
+  }, 1500);
 }
 
 $("#refreshBtn").addEventListener("click", async () => {
@@ -1181,19 +1241,35 @@ $("#refreshBtn").addEventListener("click", async () => {
   btn.disabled = true;
   btn.style.opacity = "0.5";
   try {
-    const before = lastScanGen;
     const res = await fetch(`/api/rescan`, { method: "POST", signal: AbortSignal.timeout(5000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    // Rescan runs in the background — wait until it actually finished.
-    let n = await waitForScan(before, 15000);
-    if (n === null) { await loadRepos(); n = repos.length; }
-    // Briefly show refresh confirmation in stats
-    const stats = $("#stats");
-    const original = stats.innerHTML;
-    stats.innerHTML = t("refreshDone", n);
-    setTimeout(() => { stats.innerHTML = original; render(); }, 1500);
+    const data = await res.json();
+    const scanSeq = Number(data.scan_seq) || 0;
+    const epoch = data.epoch || serverEpoch;
+    // Immediate feedback: the rescan runs in the background and can take a
+    // while, so the user must not see a stale (or empty) stats line meanwhile.
+    $("#stats").innerHTML = t("scanningNow");
+    const result = await waitForScan(scanSeq, epoch, SCAN_WAIT_MS);
+    if (result === null) {
+      // Scan is still running after our budget — reload what we have and stop
+      // pretending it succeeded; the 30s poll will pick up the final state.
+      await loadRepos();
+      flash(t("refreshPending"));
+    } else if (result.restarted) {
+      // Harbor restarted mid-wait: the requested scan is gone for good.
+      await loadRepos();
+      flash(t("refreshFailed"));
+    } else if (result.error) {
+      console.error("rescan failed:", result.error);
+      await loadRepos();
+      flash(t("refreshFailed"));
+    } else {
+      flash(t("refreshDone", result.count));
+    }
   } catch (err) {
     console.error("rescan failed:", err);
+    await loadRepos();
+    flash(t("refreshFailed"));
   } finally {
     btn.disabled = false;
     btn.style.opacity = "";
@@ -1227,6 +1303,8 @@ document.addEventListener("visibilitychange", () => {
 });
 
 async function loadRepos() {
+  // Request seq: a slow earlier response must never overwrite a newer one.
+  const my = ++loadSeq;
   try {
     const res = await fetch(`/api/repos`, { signal: AbortSignal.timeout(15000) });
     // Auth failures (401/403) mean the session cookie is missing or wrong —
@@ -1239,11 +1317,25 @@ async function loadRepos() {
       return;
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const gen = parseInt(res.headers.get("X-Harbor-Scan-Gen") || "0", 10);
-    if (!Number.isNaN(gen)) lastScanGen = gen;
-    repos = await res.json();
+    if (my !== loadSeq) return;  // superseded while waiting for headers
+    const h = readScanHeaders(res);
+    if (h.epoch !== serverEpoch) {
+      // Harbor restarted: the old scan counters are meaningless.
+      serverEpoch = h.epoch;
+      lastScanDone = h.done;
+    } else {
+      // A response from an older snapshot must never overwrite the newer one
+      // that waitForScan already rendered (e.g. a poll that started before the
+      // rescan finished but arrived after it).
+      if (h.done < lastScanDone) return;
+      lastScanDone = h.done;
+    }
+    const body = await res.json();
+    if (my !== loadSeq) return;  // superseded while parsing the body
+    repos = body;
     render();
   } catch (err) {
+    if (my !== loadSeq) return;  // a newer request owns the UI now
     console.error("loadRepos failed:", err);
     const msg = err.name === "TimeoutError" || err.name === "AbortError"
       ? t("connTimeout") : t("connError");
@@ -1717,13 +1809,22 @@ async function renderSettingsRoots() {
 $("#settingsRoots").addEventListener("click", async (e) => {
   const btn = e.target.closest(".del-btn");
   if (!btn) return;
-  // Match by path (B-3) — the contract is symmetric with POST /api/roots.
-  const before = lastScanGen;
-  await fetch(`/api/roots/${encodeURIComponent(btn.dataset.path)}`, { method: "DELETE" });
-  await renderSettingsRoots();
-  // The rescan runs in the background — wait for it so the grid reflects the
-  // removed root (the roots list above is already updated synchronously).
-  if (await waitForScan(before, 15000) === null) await loadRepos();
+  try {
+    // Match by path (B-3) — the contract is symmetric with POST /api/roots.
+    const res = await fetch(`/api/roots/${encodeURIComponent(btn.dataset.path)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    await renderSettingsRoots();
+    // The rescan runs in the background — wait for it so the grid reflects the
+    // removed root (the roots list above is already updated synchronously).
+    const scanSeq = Number(data.scan_seq) || 0;
+    const epoch = data.epoch || serverEpoch;
+    const result = await waitForScan(scanSeq, epoch, SCAN_WAIT_MS);
+    if (result === null || result.error || result.restarted) await loadRepos();
+  } catch (err) {
+    console.error("remove root failed:", err);
+    await loadRepos();
+  }
 });
 
 const BROWSE_QUICK = [{ name: "Home", path: "~" }, { name: "/", path: "/" }];
@@ -1784,16 +1885,23 @@ $("#browseList").addEventListener("click", async (e) => {
 });
 
 async function addRoot(path, label) {
-  const before = lastScanGen;
-  const res = await fetch(`/api/roots`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, label }),
-  });
-  if (res.ok) {
+  try {
+    const res = await fetch(`/api/roots`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, label }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
     await renderSettingsRoots();
     // The rescan runs in the background — wait for it so the grid shows the
     // newly discovered repos before the user closes settings.
-    if (await waitForScan(before, 15000) === null) await loadRepos();
+    const scanSeq = Number(data.scan_seq) || 0;
+    const epoch = data.epoch || serverEpoch;
+    const result = await waitForScan(scanSeq, epoch, SCAN_WAIT_MS);
+    if (result === null || result.error || result.restarted) await loadRepos();
+  } catch (err) {
+    console.error("add root failed:", err);
+    await loadRepos();
   }
 }
 
@@ -1802,7 +1910,10 @@ renderStatic();
 _setupAuthForm();
 // Session-cookie auth: root always serves the page; if `/api/repos` returns
 // 401/403 (no valid cookie), `loadRepos` shows the token gate.
-loadRepos();
+// startPolling() loads immediately *and* starts the 30s status poll, so a
+// failed/timed-out first load (or a rescan race) can self-heal even when the
+// tab stays visible the whole time.
+startPolling();
 </script>
 </body>
 </html>
