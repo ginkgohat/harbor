@@ -12,6 +12,7 @@ import time
 import urllib.request
 from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.parse import quote
 
 import pytest
 import pytest as _pytest
@@ -162,13 +163,20 @@ def test_post_rescan_returns_shape(tmp_path):
     config_path = str(tmp_path / "config.toml")
     server.app_state.config_path = config_path
     server.app_state.repos = {}
+    app = server.app_state
 
     h = _make_handler("POST", "/api/rescan", body=b"{}")
     h.do_POST()
     status, body = _read_response(h)
     assert status == 200
     assert body["ok"] is True
-    assert body["pending"] is True
+    # A fresh rescan starts immediately — nothing was queued behind a worker.
+    assert body["pending"] is False
+    # scan_seq is this request's position in the rescan sequence; the epoch
+    # identifies the server process so a restarted server is detectable.
+    assert isinstance(body["scan_seq"], int)
+    assert body["scan_seq"] >= 1
+    assert body["epoch"] == app.epoch
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +219,10 @@ def test_post_roots_adds_new_path(tmp_path):
     assert body["ok"] is True
     assert body["path"] == new_path
     assert body["label"] == "NewDir"
+    # Adding a root kicks a rescan; the response carries the sequence number to
+    # wait for and the epoch of this server process.
+    assert body["scan_seq"] >= 1
+    assert body["epoch"] == server.app_state.epoch
     # Verify in-memory roots were updated
     assert any(p == new_path for p, _ in server.app_state.roots)
     # Verify config file was written
@@ -244,6 +256,9 @@ def test_delete_root_by_path(tmp_path):
     assert status == 200
     assert body["ok"] is True
     assert body["path"] == str(a)
+    # Deleting a root also kicks a rescan; report its sequence/epoch.
+    assert body["scan_seq"] >= 1
+    assert body["epoch"] == server.app_state.epoch
 
     # Memory should now have only one root
     assert len(server.app_state.roots) == 1
@@ -914,7 +929,10 @@ def test_stale_job_swept_when_new_job_starts(monkeypatch):
 def test_fresh_job_survives_sweep(monkeypatch):
     """A recently-created job survives the lazy sweep."""
     server.app_state.jobs.clear()
-    server.app_state.jobs["fresh"] = {"queue": queue.Queue(), "created": time.monotonic() - 10}
+    server.app_state.jobs["fresh"] = {
+        "queue": queue.Queue(),
+        "created": time.monotonic() - 10,
+    }
 
     def noop_pull(repo, q):
         q.put({"done": True})
@@ -1110,7 +1128,10 @@ def test_sse_client_disconnect_leaves_job_for_sweep(monkeypatch, tmp_path):
         slow_q = queue.Queue()
         slow_job_id = "slow-test-job"
         with server.app_state.jobs_lock:
-            server.app_state.jobs[slow_job_id] = {"queue": slow_q, "created": time.monotonic()}
+            server.app_state.jobs[slow_job_id] = {
+                "queue": slow_q,
+                "created": time.monotonic(),
+            }
 
         slow_q.put({"repo": "test", "status": "running"})
         # Connect via raw socket, read one event, then close abruptly
@@ -1183,6 +1204,31 @@ def test_get_repos_serves_cached_snapshot():
     recompute.assert_not_called()
 
 
+def test_get_repos_emits_scan_protocol_headers():
+    """GET /api/repos reports gen/done/epoch and is never cached."""
+    app = server.app_state
+    status_dict = {"name": "fake", "path": "fake", "dirty": False}
+    app.repos = {"fake": {"name": "fake", "path": "fake"}}
+    app.repo_status = {"fake": status_dict}
+    app.scan_generation = 4
+    app.scan_completed_seq = 9
+    app.last_scan_error = None
+
+    h = _make_handler("GET", "/api/repos")
+    h.do_GET()
+    status, body = _read_response(h)
+    headers = _response_headers(h)
+
+    assert status == 200
+    assert body == [status_dict]
+    assert "Cache-Control: no-store" in headers
+    assert "X-Harbor-Scan-Gen: 4" in headers
+    assert f"X-Harbor-Epoch: {app.epoch}" in headers
+    assert "X-Harbor-Scan-Done: 9" in headers
+    # A healthy scan never reports an error header.
+    assert not [ln for ln in headers if ln.lower().startswith("x-harbor-scan-error:")]
+
+
 def test_get_repos_falls_back_to_live_when_snapshot_empty():
     """Empty snapshot + non-empty repos → compute on demand and cache it."""
     server.app_state.repos = {"fake": {"name": "fake", "path": "fake"}}
@@ -1210,34 +1256,194 @@ def test_get_repos_falls_back_to_live_when_snapshot_empty():
     assert server.app_state.repo_status == {"fake": live[0]}
 
 
+def test_get_repos_fallback_does_not_clobber_newer_snapshot():
+    """An on-demand compute that raced a rescan must not overwrite the new snapshot.
+
+    The live computation runs outside ``state_lock``; if a rescan publishes a
+    newer repo set/snapshot while it is in flight, the stale result is dropped
+    and the response serves the newer state (body, gen, and done stay coherent).
+    """
+    app = server.app_state
+    app.repos = {"old": {"name": "old", "path": "old"}}
+    old_live = [{"name": "old", "path": "old", "dirty": True}]
+    new_status = {"name": "new", "path": "new", "dirty": False}
+
+    def _rebind_then_return(repos):
+        # Simulate a rescan publishing a new repo set + snapshot mid-compute.
+        app.repos = {"new": {"name": "new", "path": "new"}}
+        app.repo_status = {"new": new_status}
+        app.scan_generation = 2
+        app.scan_completed_seq = 1
+        return old_live
+
+    with patch(
+        "harbor.server.git_ops.get_repos_status", side_effect=_rebind_then_return
+    ) as m:
+        h = _make_handler("GET", "/api/repos")
+        h.do_GET()
+        status, body = _read_response(h)
+    headers = _response_headers(h)
+
+    assert status == 200
+    m.assert_called()  # leftover workers from earlier tests may also call it
+    assert body == [new_status]
+    assert app.repo_status == {"new": new_status}
+    assert "X-Harbor-Scan-Gen: 2" in headers
+    assert "X-Harbor-Scan-Done: 1" in headers
+
+
 def test_rescan_runs_in_background_and_bumps_generation(tmp_path):
     """POST /api/rescan returns immediately; the scan runs in the background.
 
-    The worker swaps repos, pre-computes a fresh status snapshot, and bumps
-    scan_generation (reported via the X-Harbor-Scan-Gen header) when done.
+    The worker swaps repos, pre-computes a fresh status snapshot, bumps
+    scan_generation (X-Harbor-Scan-Gen) and advances scan_completed_seq to the
+    request's scan_seq (X-Harbor-Scan-Done) when done.
     """
-    server.app_state.config_path = str(tmp_path / "config.toml")
-    server.app_state.roots = []  # empty tree → no repos
-    before = server.app_state.scan_generation
+    app = server.app_state
+    app.config_path = str(tmp_path / "config.toml")
+    app.roots = []  # empty tree → no repos
+    before = app.scan_generation
 
     h = _make_handler("POST", "/api/rescan", body=b"{}")
     h.do_POST()
-    status, _ = _read_response(h)
+    status, req_body = _read_response(h)
     assert status == 200
+    scan_seq = req_body["scan_seq"]
 
     deadline = time.time() + 5
-    while server.app_state.scan_generation <= before and time.time() < deadline:
+    while app.scan_generation <= before and time.time() < deadline:
         time.sleep(0.05)
-    assert server.app_state.scan_generation == before + 1
-    assert server.app_state.repos == {}
-    assert server.app_state.repo_status == {}
+    assert app.scan_generation == before + 1
+    assert app.scan_completed_seq >= scan_seq
+    assert app.last_scan_error is None
+    assert app.repos == {}
+    assert app.repo_status == {}
 
-    # /api/repos reports the completed-scan generation in a header.
+    # /api/repos reports the completed-scan generation and sequence in headers.
     h = _make_handler("GET", "/api/repos")
     h.do_GET()
     raw = h.wfile.getvalue()
     head = raw.partition(b"\r\n\r\n")[0].decode("latin1")
     assert f"X-Harbor-Scan-Gen: {before + 1}" in head
+    assert f"X-Harbor-Scan-Done: {app.scan_completed_seq}" in head
+
+
+def test_rescan_failure_does_not_bump_generation_and_reports_error(
+    tmp_path, monkeypatch
+):
+    """A failing rescan advances scan_completed_seq but not scan_generation.
+
+    The frontend must be able to tell a failure apart from a pending scan: the
+    error is surfaced via X-Harbor-Scan-Error, the previous repos/snapshot are
+    left untouched, and a later successful scan clears the error.
+    """
+    app = server.app_state
+    app.config_path = str(tmp_path / "config.toml")
+    app.roots = []
+    repo = {"name": "fake", "path": "fake"}
+    status_dict = {"name": "fake", "path": "fake", "dirty": True}
+    app.repos = {"fake": repo}
+    app.repo_status = {"fake": status_dict}
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("scan exploded")
+
+    monkeypatch.setattr(server.scanner_mod, "scan_roots", _boom)
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    status, body = _read_response(h)
+    assert status == 200
+    scan_seq = body["scan_seq"]
+
+    deadline = time.time() + 5
+    while app.scan_completed_seq < scan_seq and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.scan_completed_seq >= scan_seq
+    assert app.scan_generation == 0
+    assert app.last_scan_error is not None
+    assert "RuntimeError" in app.last_scan_error
+    # A failed scan leaves the previous repos and snapshot untouched.
+    assert app.repos == {"fake": repo}
+    assert app.repo_status == {"fake": status_dict}
+
+    h = _make_handler("GET", "/api/repos")
+    h.do_GET()
+    status, _ = _read_response(h)
+    headers = _response_headers(h)
+    error_lines = [
+        ln for ln in headers if ln.lower().startswith("x-harbor-scan-error:")
+    ]
+    assert status == 200
+    assert len(error_lines) == 1
+    assert quote(app.last_scan_error, safe="") in error_lines[0]
+    # The completion sequence advanced, so a waiting client stops polling.
+    assert f"X-Harbor-Scan-Done: {app.scan_completed_seq}" in headers
+
+    # A later successful scan clears the error and bumps the generation.
+    monkeypatch.setattr(server.scanner_mod, "scan_roots", lambda *a, **k: {})
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    status, second = _read_response(h)
+    assert status == 200
+    deadline = time.time() + 5
+    while app.scan_generation < 1 and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.scan_generation == 1
+    assert app.scan_completed_seq >= second["scan_seq"]
+    assert app.last_scan_error is None
+
+    h = _make_handler("GET", "/api/repos")
+    h.do_GET()
+    headers = _response_headers(h)
+    assert not [ln for ln in headers if ln.lower().startswith("x-harbor-scan-error:")]
+
+
+def test_request_rescan_reports_pending_when_worker_running(monkeypatch):
+    """A rescan request that arrives while a worker runs is queued (pending)."""
+    app = HarborApp()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_worker(app_: HarborApp) -> None:
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(server, "_rescan_worker", _blocking_worker)
+    try:
+        seq1, pending1 = server._request_rescan(app)
+        assert pending1 is False
+        assert started.wait(5)
+        seq2, pending2 = server._request_rescan(app)
+        assert pending2 is True
+        assert seq2 == seq1 + 1
+    finally:
+        release.set()
+
+
+def test_request_rescan_rolls_back_on_thread_start_failure(monkeypatch):
+    """If the worker thread cannot start, rescanning must not stay stuck True."""
+
+    class _BoomThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("cannot start worker")
+
+    app = HarborApp()
+    monkeypatch.setattr(server.threading, "Thread", _BoomThread)
+    with pytest.raises(RuntimeError):
+        server._request_rescan(app)
+    assert app.rescanning is False
+
+
+def test_epoch_is_unique_per_app_instance():
+    """Each HarborApp gets its own epoch, and its own state lock."""
+    a, b = HarborApp(), HarborApp()
+    assert a.epoch != b.epoch
+    assert len(a.epoch) == 32
+    int(a.epoch, 16)  # hex-encoded uuid4
+    assert a.state_lock is not b.state_lock
 
 
 def test_repo_action_updates_cached_snapshot(tmp_path):
@@ -1250,12 +1456,11 @@ def test_repo_action_updates_cached_snapshot(tmp_path):
     fresh = {"name": "fake", "path": "fake", "dirty": False}
     outcome = server.git_ops.ActionOutcome(ok=True, output="ok")
 
-    with patch("harbor.server.git_ops.do_action", return_value=outcome), patch(
-        "harbor.server.git_ops.repo_status", return_value=fresh
+    with (
+        patch("harbor.server.git_ops.do_action", return_value=outcome),
+        patch("harbor.server.git_ops.repo_status", return_value=fresh),
     ):
-        h = _make_handler(
-            "POST", "/api/repo/fake/action", body=b'{"action":"pull"}'
-        )
+        h = _make_handler("POST", "/api/repo/fake/action", body=b'{"action":"pull"}')
         h.do_POST()
         status, body = _read_response(h)
     assert status == 200
@@ -1273,14 +1478,19 @@ def test_refresh_once_populates_snapshot():
     assert app.repo_status == {"fake": live[0]}
 
 
-def test_refresh_once_discards_snapshot_when_repos_rebound():
-    """If repos is rebound mid-compute, the computed snapshot is discarded."""
+def test_refresh_once_preserves_snapshot_when_repos_rebound():
+    """A pass that raced a rescan keeps the previous snapshot (never wipes it)."""
     app = HarborApp()
     app.repos = {"old": {"name": "old", "path": "old"}}
+    old_snapshot = {"old": {"name": "old", "path": "old", "dirty": True}}
+    app.repo_status = dict(old_snapshot)
 
     def _rebind(repos):
         app.repos = {"new": {"name": "new", "path": "new"}}
+        return [{"name": "old", "path": "old", "dirty": False}]
 
     with patch("harbor.server.git_ops.get_repos_status", side_effect=_rebind):
         server._refresh_once(app)
-    assert app.repo_status == {}
+    # The stale result is discarded, but the last good snapshot survives — an
+    # interrupting rescan publishes its own snapshot right after.
+    assert app.repo_status == old_snapshot

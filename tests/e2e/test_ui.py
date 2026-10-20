@@ -126,6 +126,16 @@ def server_url(tmp_path):
     server_mod.app_state = saved_state
 
 
+@pytest.fixture
+def repo_root(tmp_path):
+    """The root directory the `server_url` fixture scans for repos.
+
+    Both fixtures depend on the same per-test ``tmp_path`` instance, so a repo
+    created here after the page has loaded is discovered by the next rescan.
+    """
+    return tmp_path
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -494,6 +504,61 @@ def test_refresh_button_rescans_repos(page, server_url):
     page.wait_for_selector(".grid", timeout=5000)
     cards = page.locator(".card").count()
     assert cards >= 2
+
+
+def test_polling_starts_on_page_load(page, server_url):
+    """The 30s status poll must start on page load, not only on tab return.
+
+    Without it, one failed/timed-out load leaves the UI stale forever while the
+    tab stays visible (the original "refresh doesn't update" bug).
+    """
+    base_url, token = server_url
+    page.goto(f"{base_url}/?token={token}")
+    page.wait_for_selector(".grid", timeout=5000)
+
+    assert page.evaluate("() => pollTimer !== null")
+
+
+def test_refresh_button_applies_new_repo(page, server_url, repo_root):
+    """A repo created after page load appears in the UI after clicking refresh."""
+    base_url, token = server_url
+    page.goto(f"{base_url}/?token={token}")
+    page.wait_for_selector(".card", timeout=5000)
+
+    # Create a new git repo under the scanned root while the page is open.
+    new_repo = repo_root / "repo-new"
+    new_repo.mkdir()
+    subprocess.run(["git", "init", str(new_repo)], capture_output=True, check=True)
+    (new_repo / "README.md").write_text("hello new repo\n")
+    subprocess.run(["git", "add", "."], cwd=str(new_repo), capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=str(new_repo),
+        capture_output=True,
+        check=True,
+    )
+
+    page.locator("#refreshBtn").click()
+
+    # The new repo may render as an attention card or in the synced strip —
+    # either proves the rescan result was applied to the UI.
+    page.wait_for_function(
+        """() => {
+            if (document.querySelector('.card[data-name="repo-new"]')) return true;
+            const synced = document.querySelector('#syncedList');
+            return !!synced && synced.textContent.includes('repo-new');
+        }""",
+        timeout=10000,
+    )
 
 
 # ---------------------------------------------------------------------------
