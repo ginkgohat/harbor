@@ -46,7 +46,7 @@ dev = [
     # pre-installed — `playwright install` then becomes a no-op.  On a mismatch
     # the browser would just be re-downloaded, so keep both in sync.
     "playwright==1.62.0",
-    "pytest-playwright==0.9.0",
+    "pytest-playwright==0.10.0",
 ]
 
 [build-system]
