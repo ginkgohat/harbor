@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypedDict
-from urllib.parse import ParseResult, parse_qs, unquote, urlparse
+from urllib.parse import ParseResult, parse_qs, quote, unquote, urlparse
 
 from . import config as config_mod
 from . import git as git_ops
@@ -119,7 +119,11 @@ def _get_index(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) 
         qs = parse_qs(parsed.query)
         tokens = qs.get("token")
         launch = tokens[0] if tokens else None
-        if launch and app_state.session_secret is not None and launch == app_state.auth_token:
+        if (
+            launch
+            and app_state.session_secret is not None
+            and launch == app_state.auth_token
+        ):
             host = self.headers.get("Host", "")
             self.send_response(302)
             self._set_session_cookie(_normalize_hostport(host))
@@ -191,16 +195,43 @@ def _get_repos(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) 
     If the snapshot is empty but repos exist — first request before the
     refresher's first tick, or a rescan just invalidated it — compute once on
     demand so the UI never shows an empty list.
+
+    The body and the scan-protocol headers are read atomically under
+    ``state_lock``, so a response can never pair an old body with a newer
+    generation counter.  An on-demand compute happens outside the lock and its
+    result is written back only if the repo set and generation are still the
+    ones it was computed from; otherwise the fresh result is discarded and the
+    current (possibly newer) snapshot is served instead.
     """
-    snapshot = app_state.repo_status
-    if not snapshot and app_state.repos:
-        snapshot = {s["path"]: s for s in git_ops.get_repos_status(app_state.repos)}
-        app_state.repo_status = snapshot
-    self._send_json(
-        200,
-        list(snapshot.values()),
-        headers={"X-Harbor-Scan-Gen": str(app_state.scan_generation)},
-    )
+    with app_state.state_lock:
+        gen = app_state.scan_generation
+        done = app_state.scan_completed_seq
+        epoch = app_state.epoch
+        err = app_state.last_scan_error
+        repos = app_state.repos
+        snapshot = app_state.repo_status
+    if not snapshot and repos:
+        live = {s["path"]: s for s in git_ops.get_repos_status(repos)}
+        with app_state.state_lock:
+            if app_state.repos is repos and app_state.scan_generation == gen:
+                app_state.repo_status = live
+                snapshot = live
+            else:
+                # A rescan published a newer repo set/snapshot while we were
+                # computing; never overwrite it with this stale result.
+                gen = app_state.scan_generation
+                done = app_state.scan_completed_seq
+                epoch = app_state.epoch
+                err = app_state.last_scan_error
+                snapshot = app_state.repo_status
+    headers = {
+        "X-Harbor-Scan-Gen": str(gen),
+        "X-Harbor-Epoch": epoch,
+        "X-Harbor-Scan-Done": str(done),
+    }
+    if err:
+        headers["X-Harbor-Scan-Error"] = quote(err, safe="")
+    self._send_json(200, list(snapshot.values()), headers=headers)
 
 
 @_route("GET", r"^/api/roots$")
@@ -268,8 +299,17 @@ def _post_roots(
     if not any(r.get("path") == path for r in roots_list):
         roots_list.append({"path": path, "label": label})
         config_mod.save_config(app_state.config_path, config)
-    self._rescan()
-    self._send_json(200, {"ok": True, "path": path, "label": label})
+    scan_seq, _ = self._rescan()
+    self._send_json(
+        200,
+        {
+            "ok": True,
+            "path": path,
+            "label": label,
+            "scan_seq": scan_seq,
+            "epoch": app_state.epoch,
+        },
+    )
 
 
 @_route("POST", r"^/api/rescan$")
@@ -278,12 +318,22 @@ def _post_rescan(
 ) -> None:
     """Trigger a background rescan and return immediately.
 
-    The scan runs off the request thread; when it completes it bumps
-    ``app_state.scan_generation`` (reported via the X-Harbor-Scan-Gen header
-    on /api/repos), which the frontend polls for before updating the UI.
+    The scan runs off the request thread.  Success bumps
+    ``app_state.scan_generation`` and advances ``scan_completed_seq`` to the
+    returned ``scan_seq``; failure only advances ``scan_completed_seq`` and
+    records ``last_scan_error``.  Both are reported via headers on /api/repos,
+    which the frontend polls before updating the UI.
     """
-    self._rescan()
-    self._send_json(200, {"ok": True, "pending": True})
+    scan_seq, pending = self._rescan()
+    self._send_json(
+        200,
+        {
+            "ok": True,
+            "pending": pending,
+            "scan_seq": scan_seq,
+            "epoch": app_state.epoch,
+        },
+    )
 
 
 @_route("POST", r"^/api/repo/(?P<path>.+)/action$")
@@ -298,16 +348,23 @@ def _post_repo_action(
     http_code = _outcome_http_code(outcome)
     result = outcome.as_dict()
     if outcome.status == "ok":
-        repo = app_state.repos.get(path)
+        with app_state.state_lock:
+            repo = app_state.repos.get(path)
+            in_snapshot = path in app_state.repo_status
         if repo is not None:
+            # The git probe runs outside the lock — it can take a while, and
+            # blocking every /api/repos read on it would defeat the snapshot.
             fresh = git_ops.repo_status(repo)
             result["status"] = fresh
             # Keep the background snapshot consistent so the next poll doesn't
-            # revert this card to its pre-action status.
-            if path in app_state.repo_status:
-                snapshot = dict(app_state.repo_status)
-                snapshot[path] = fresh
-                app_state.repo_status = snapshot
+            # revert this card to its pre-action status.  Only patch when the
+            # repo entry is still the one we sampled (a rescan may have rebound
+            # app.repos meanwhile) and the snapshot still tracks it.
+            with app_state.state_lock:
+                if app_state.repos.get(path) is repo and in_snapshot:
+                    snapshot = dict(app_state.repo_status)
+                    snapshot[path] = fresh
+                    app_state.repo_status = snapshot
     self._send_json(http_code, result)
 
 
@@ -327,8 +384,10 @@ def _delete_root(
     if "roots" in config:
         config["roots"] = [r for r in config["roots"] if r.get("path", "") != path]
         config_mod.save_config(app_state.config_path, config)
-    self._rescan()
-    self._send_json(200, {"ok": True, "path": path})
+    scan_seq, _ = self._rescan()
+    self._send_json(
+        200, {"ok": True, "path": path, "scan_seq": scan_seq, "epoch": app_state.epoch}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +476,9 @@ def _login_throttled(addr: str) -> bool:
     with app_state.login_lock:
         now = time.monotonic()
         keep = [
-            t for t in app_state.login_failures.get(addr, []) if now - t < LOGIN_WINDOW_SECONDS
+            t
+            for t in app_state.login_failures.get(addr, [])
+            if now - t < LOGIN_WINDOW_SECONDS
         ]
         app_state.login_failures[addr] = keep
         return len(keep) >= LOGIN_MAX_FAILURES
@@ -515,20 +576,26 @@ REFRESH_INTERVAL = 30.0
 def _refresh_once(app: HarborApp) -> None:
     """Compute one fresh status snapshot for ``app.repos`` and swap it in.
 
-    The snapshot is swapped in only if the repo set didn't change while we
-    were computing (a rescan rebinds ``app.repos``, making a concurrent result
-    stale — the snapshot is dropped instead, and the next /api/repos falls
-    back to an on-demand compute).
+    The (repo set, generation) pair is captured under ``state_lock`` and the
+    status computation runs outside it.  The snapshot is published only if
+    neither changed meanwhile: a rescan rebinds ``app.repos`` and bumps
+    ``scan_generation``, which makes this pass stale.  A stale pass is simply
+    discarded — the previous snapshot is kept so a concurrent /api/repos never
+    regresses to an empty list.
     """
-    repos = app.repos
+    with app.state_lock:
+        repos = app.repos
+        gen = app.scan_generation
     try:
         snapshot = {s["path"]: s for s in git_ops.get_repos_status(repos)}
     except Exception:
         # One bad iteration (a pathological repo) must not kill the
-        # refresher — log and retry next cycle.
+        # refresher — log, keep the last good snapshot, and retry next cycle.
         logger.exception("status refresh failed; will retry")
-        snapshot = {}
-    app.repo_status = snapshot if app.repos is repos else {}
+        return
+    with app.state_lock:
+        if app.repos is repos and app.scan_generation == gen:
+            app.repo_status = snapshot
 
 
 def _refresh_loop(app: HarborApp) -> None:
@@ -558,33 +625,54 @@ def start_status_refresher(app: HarborApp) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _request_rescan(app: HarborApp) -> None:
-    """Kick off a background rescan; returns immediately.
+def _request_rescan(app: HarborApp) -> tuple[int, bool]:
+    """Kick off a background rescan and return ``(scan_seq, pending)``.
+
+    ``scan_seq`` is this request's position in the rescan sequence; the
+    frontend waits until ``/api/repos`` reports ``scan_completed_seq >=
+    scan_seq``.  ``pending`` is True when a worker was already running and this
+    request merely queued another pass.
 
     Single-flight: if a worker is already running, set ``rescan_requested`` so
     it loops once more after finishing instead of missing this mutation (a
     quick add-then-remove of roots while a scan is in flight would otherwise
     serve a stale repo list until the next explicit refresh).
     """
+    with app.state_lock:
+        app.scan_request_seq += 1
+        scan_seq = app.scan_request_seq
     with app.rescan_lock:
         if app.rescanning:
             app.rescan_requested = True
-            return
+            return scan_seq, True
         app.rescanning = True
-    threading.Thread(
-        target=_rescan_worker, args=(app,), daemon=True, name="rescan-worker"
-    ).start()
+    try:
+        threading.Thread(
+            target=_rescan_worker, args=(app,), daemon=True, name="rescan-worker"
+        ).start()
+    except Exception:
+        # Never leave rescanning stuck True: that would silently swallow every
+        # future rescan request.  Re-raise so the caller reports a failure.
+        with app.rescan_lock:
+            app.rescanning = False
+        raise
+    return scan_seq, False
 
 
 def _rescan_worker(app: HarborApp) -> None:
     """Run background rescans until none are requested (single-flight loop).
 
     Each pass re-scans all roots (fast for known repos thanks to the scanner's
-    cross-scan default-branch cache), swaps in the new repo set, computes a
-    fresh status snapshot so /api/repos is instant right after, and bumps
-    ``scan_generation`` — the signal the frontend polls for.
+    cross-scan default-branch cache), then publishes the new repo set, the
+    pre-computed status snapshot, and a bumped ``scan_generation`` atomically
+    under ``state_lock``.  ``scan_completed_seq`` advances to the request
+    sequence this pass started from on success *and* on failure, so a waiting
+    frontend always learns the outcome (success, or the error reported via
+    ``last_scan_error`` / the X-Harbor-Scan-Error header).
     """
     while True:
+        with app.state_lock:
+            target = app.scan_request_seq
         try:
             config = config_mod.load_config(app.config_path) or {}
             # Reload depth settings from config (CLI args remain supreme)
@@ -593,20 +681,26 @@ def _rescan_worker(app: HarborApp) -> None:
             if app.cli_max_depth is None:
                 app.max_depth = config.get("max_depth", app.max_depth)
             new_repos = scanner_mod.scan_roots(
-                app.roots,
-                min_depth=app.min_depth,
-                max_depth=app.max_depth,
+                app.roots, min_depth=app.min_depth, max_depth=app.max_depth
             )
             # Pre-compute the status snapshot for the new set so the frontend's
             # post-rescan /api/repos poll is instant (no on-demand blocking).
             statuses = git_ops.get_repos_status(new_repos)
-            app.repos = new_repos
-            app.repo_status = {s["path"]: s for s in statuses}
-            app.scan_generation += 1
-        except Exception:
-            # Do not bump the generation — the frontend's wait times out and
-            # falls back to whatever it has; the error is logged for humans.
+        except Exception as exc:
+            # Do not bump the generation — the frontend sees
+            # scan_completed_seq advance but gen unchanged, plus the error
+            # header, and reports a failed refresh instead of a fake success.
+            with app.state_lock:
+                app.last_scan_error = f"{type(exc).__name__}: {exc}"[:300]
+                app.scan_completed_seq = max(app.scan_completed_seq, target)
             logger.exception("background rescan failed")
+        else:
+            with app.state_lock:
+                app.repos = new_repos
+                app.repo_status = {s["path"]: s for s in statuses}
+                app.scan_generation += 1
+                app.scan_completed_seq = max(app.scan_completed_seq, target)
+                app.last_scan_error = None
         with app.rescan_lock:
             if app.rescan_requested:
                 app.rescan_requested = False
@@ -638,6 +732,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", CSP_HEADER)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         for k, v in (headers or {}).items():
             self.send_header(k, v)
@@ -766,16 +861,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Re-scan
     # ------------------------------------------------------------------
 
-    def _rescan(self) -> None:
-        """Kick off a background rescan; returns immediately.
+    def _rescan(self) -> tuple[int, bool]:
+        """Kick off a background rescan and return ``(scan_seq, pending)``.
 
         The actual scan runs on a daemon worker (see ``_rescan_worker``) so a
-        huge root tree never blocks the request thread.  The worker swaps in
-        the new repo set, computes a fresh status snapshot, and bumps
-        ``app.scan_generation`` — the frontend polls /api/repos for that
-        counter to know when the scan is done.
+        huge root tree never blocks the request thread.  ``scan_seq`` is the
+        request's sequence number; the frontend waits for /api/repos to report
+        ``scan_completed_seq >= scan_seq``.  ``pending`` is True when the
+        request was queued behind an already-running worker.
         """
-        _request_rescan(app_state)
+        return _request_rescan(app_state)
 
     # ------------------------------------------------------------------
     # Dispatch

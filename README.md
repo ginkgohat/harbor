@@ -37,18 +37,70 @@ It's also intentionally simple: one Python package + a self-contained HTML front
 
 ## Quick Start
 
-> **Note**: The PyPI name `harbor` is taken by another project. Install from GitHub:
+> **Note**: The PyPI name `harbor` is taken by another project, so Harbor is installed from GitHub.
+
+### Install with pipx (recommended)
+
+[pipx](https://pipx.pypa.io/) gives Harbor its own isolated virtualenv and puts
+the `harbor` command on your `PATH`. It sidesteps the
+`error: externally-managed-environment` failure (PEP 668) that plain `pip` hits
+on Homebrew, Debian, Ubuntu and Fedora Pythons, and it can't break your other
+Python packages.
 
 ```bash
-# Install from GitHub
-pip install git+https://github.com/ginkgohat/harbor.git
+# 1. Install pipx (skip if `pipx --version` already works)
+brew install pipx                    # macOS (Homebrew)
+sudo apt install pipx                # Debian / Ubuntu 23.04+
+python3 -m pip install --user pipx   # fallback for Pythons that allow user installs
 
-# Update to the latest version
-pip install --upgrade git+https://github.com/ginkgohat/harbor.git
+# 2. Put ~/.local/bin (where pipx exposes commands) on your PATH
+pipx ensurepath                      # open a new terminal afterwards
 
-# Uninstall
-pip uninstall harbor
+# 3. Install Harbor from GitHub
+pipx install "git+https://github.com/ginkgohat/harbor.git"
+
+# 4. Verify
+harbor --version                     # → harbor 0.1.2.dev9+g...
 ```
+
+### Install into a virtualenv (alternative)
+
+Use this if you prefer a dedicated environment you manage yourself:
+
+```bash
+python3 -m venv ~/.venvs/harbor
+~/.venvs/harbor/bin/pip install "git+https://github.com/ginkgohat/harbor.git"
+~/.venvs/harbor/bin/harbor --version
+```
+
+On Windows the scripts live in `~/.venvs/harbor/Scripts/` instead of `bin/`.
+
+### Update / uninstall
+
+```bash
+# pipx install
+pipx upgrade harbor        # force a rebuild from the same GitHub URL: pipx reinstall harbor
+pipx uninstall harbor
+
+# virtualenv install
+~/.venvs/harbor/bin/pip install --upgrade "git+https://github.com/ginkgohat/harbor.git"
+rm -rf ~/.venvs/harbor
+```
+
+Harbor also has built-in helpers that check how it was installed and print the
+command that actually works for your setup:
+
+```bash
+harbor update       # upgrade, or tell you the right pipx / venv / PEP 668 command
+harbor uninstall    # remove, or tell you the right pipx / PEP 668 command
+```
+
+> **Plain `pip` caveat** — `pip install ...` and `pip install --upgrade ...` only
+> work inside a virtualenv or with `--user` on a Python that is not PEP 668
+> managed. On a Homebrew/Debian/Fedora system Python they fail with
+> `error: externally-managed-environment`. The escape hatch
+> `pip install --user --break-system-packages "git+..."` works but can break
+> OS- or Homebrew-provided Python packages — prefer pipx or a venv.
 
 ```bash
 # Run — scan the current directory
@@ -59,13 +111,6 @@ harbor ~/projects
 
 # Or scan multiple directories
 harbor ~/work ~/personal ~/oss
-```
-
-Harbor also has built-in update and uninstall commands:
-
-```bash
-harbor update       # Upgrade Harbor to the latest version
-harbor uninstall    # Remove Harbor from your system
 ```
 
 ### Background mode
@@ -84,14 +129,19 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765) — or let Harbor open it fo
 git clone https://github.com/ginkgohat/harbor.git
 cd harbor
 
-# Option A: pip install in dev mode
-pip install -e .
+# Option A: editable install + dev dependencies
+# (`make dev` adds --break-system-packages when the interpreter needs it)
+make dev
 harbor ~/projects
 
 # Option B: run directly (no install needed)
 make run
 # or: PYTHONPATH=src python3 -m harbor ~/projects
 ```
+
+Editable installs are a live checkout and cannot self-update — `harbor update`
+will tell you so. Update a dev checkout with `git pull` (then `make dev` if
+dependencies changed).
 
 ### Makefile
 
@@ -149,6 +199,89 @@ harbor --port 8766
 # Find and stop the process using port 8765
 lsof -i :8765
 ```
+
+### `error: externally-managed-environment` when installing
+
+Your Python is marked as externally managed (PEP 668) by Homebrew, Debian,
+Ubuntu, Fedora, etc., so pip refuses to install into it. Use pipx (recommended)
+or a virtualenv instead:
+
+```bash
+pipx install "git+https://github.com/ginkgohat/harbor.git"
+# or
+python3 -m venv ~/.venvs/harbor
+~/.venvs/harbor/bin/pip install "git+https://github.com/ginkgohat/harbor.git"
+```
+
+`--user` alone does not help on these Pythons; `--break-system-packages` does,
+at the risk of breaking OS-provided packages. `harbor update` detects this
+situation and prints the same options instead of letting pip fail.
+
+### `harbor: command not found`
+
+pipx and `pip install --user` put executables in `~/.local/bin`, which is not
+always on `PATH`:
+
+```bash
+pipx ensurepath                                    # then open a new terminal
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # non-pipx installs
+```
+
+Check what is installed and where — without relying on `PATH`:
+
+```bash
+pipx list                       # pipx-managed apps and their executables
+which -a harbor                 # every `harbor` on PATH, in resolution order
+~/.local/bin/harbor --version   # bypass PATH lookup
+```
+
+### Installed or upgraded Harbor, but nothing changed
+
+Install, update and uninstall must target the **same interpreter** that provides
+the `harbor` command. A machine can have several Pythons and pips:
+
+```bash
+which -a python3 pip harbor     # note the order — the first wins
+harbor --version                # what your shell actually runs
+python3 -m pip show harbor      # what *this* interpreter has installed
+/opt/homebrew/bin/harbor --version   # what another install reports
+```
+
+If `pip install --upgrade ...` modifies a different Python than the one behind
+`harbor`, the command keeps running the old copy. The reliable fix is pipx (one
+isolated environment per app) or the virtualenv route, where you always call
+`~/.venvs/harbor/bin/pip` and `~/.venvs/harbor/bin/harbor`. To clean up, remove
+Harbor from each interpreter you find (`pipx uninstall harbor`,
+`pip uninstall harbor`, ...) until `which -a harbor` is empty.
+
+### `harbor update` says self-update is not available
+
+Editable installs (`make dev`, `pip install -e .`) are a live checkout of the
+source tree, so pip has nothing to upgrade. Update the checkout instead:
+
+```bash
+git -C /path/to/harbor pull
+make dev
+```
+
+### Version looks older than expected after installing from GitHub
+
+Harbor's version is derived by `setuptools-scm` from the git tags in the clone
+pip builds. If tags were never pushed, GitHub builds a lower version than your
+local checkout — for example local `0.1.2.dev9` but `0.1.1.dev15` when installing
+from GitHub, because tag `v0.1.1` exists only locally:
+
+```bash
+git tag -l                       # tags in your local clone
+git ls-remote --tags origin      # tags GitHub actually has
+git push --tags                  # publish the missing tags
+harbor --version                 # version of the installed copy
+```
+
+`pip install --upgrade git+...` rebuilds from the current default branch, so it
+can genuinely "downgrade" a checkout whose local version is higher. That is a
+version-string artifact, not a stale install: `harbor --version` includes the
+`+g<sha>` commit, which you can compare against `git rev-parse HEAD`.
 
 ## Security model
 

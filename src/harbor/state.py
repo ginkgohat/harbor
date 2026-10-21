@@ -15,6 +15,7 @@ attribute (``server.app_state``).
 from __future__ import annotations
 
 import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,6 +52,22 @@ class HarborApp:
         rescan_requested: True when a mutation asked for a rescan while one
             was already running (worker re-runs instead of missing it).
         rescan_lock: Guards ``rescanning``/``rescan_requested``.
+        epoch: Random hex id, unique per :class:`HarborApp` instance.  Reported
+            via the X-Harbor-Epoch header so a browser tab can detect that the
+            server process restarted (and its scan counters reset).
+        state_lock: Reentrant lock guarding publication and reads of ``repos``,
+            ``repo_status``, ``scan_generation``, ``scan_request_seq``,
+            ``scan_completed_seq``, and ``last_scan_error``.  A reader must
+            observe a consistent (repo set, snapshot, scan counters) tuple.
+        scan_request_seq: Incremented once per rescan request (including the
+            ones triggered by adding/removing roots); returned to the frontend
+            as ``scan_seq`` so it can wait for exactly that request to finish.
+        scan_completed_seq: Set to the ``scan_request_seq`` observed when a
+            worker pass started, both on success and on failure; monotonically
+            non-decreasing.  The frontend waits for ``completed >= scan_seq``.
+        last_scan_error: Error string of the most recent failed rescan pass
+            (``"Type: message"``, truncated), cleared by the next success;
+            reported via the X-Harbor-Scan-Error header.
     """
 
     # --- configuration / repo state ---
@@ -97,3 +114,19 @@ class HarborApp:
     rescanning: bool = False
     rescan_requested: bool = False
     rescan_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # --- scan completion protocol ---
+    # Unique per instance so a restarted server is never confused with the
+    # previous process by a still-open browser tab.
+    epoch: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # Guards publication/reads of repos, repo_status, and the scan counters so
+    # /api/repos can never pair a stale body with a newer generation counter.
+    state_lock: threading.RLock = field(default_factory=threading.RLock)
+    # Requests a rescan (explicit refresh or a roots mutation); the frontend
+    # waits for scan_completed_seq to reach the value returned as scan_seq.
+    scan_request_seq: int = 0
+    # Request sequence observed by the pass that just finished (success or
+    # failure); monotonically non-decreasing.
+    scan_completed_seq: int = 0
+    # Last rescan failure ("Type: message"), cleared on the next success.
+    last_scan_error: str | None = None
