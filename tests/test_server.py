@@ -862,11 +862,28 @@ def test_cli_roots_not_persisted_to_config(tmp_path, monkeypatch):
     Rationale: `harbor <path>` should behave like `ls <path>` — it scans
     what you give it once, and doesn't mutate persistent state.
     """
+    from harbor import daemon as daemon_mod
     from harbor.__main__ import main
 
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     config_path = tmp_path / "config.toml"
+
+    # main()/_run_server writes PID/port/token files under the *platform*
+    # state dir and registers an atexit handler that deletes them.  Without
+    # redirecting those paths this test would overwrite (and, at interpreter
+    # exit, delete) the developer's real ~/Library/.../harbor state — breaking
+    # `harbor status`/`harbor stop` for a running instance.
+    state_dir = tmp_path / "state"
+    for attr, filename in (
+        ("STATE_DIR", "state"),
+        ("PID_FILE", "harbor.pid"),
+        ("LOG_FILE", "harbor.log"),
+        ("TOKEN_FILE", "harbor.token"),
+        ("PORT_FILE", "harbor.port"),
+        ("SESSION_SECRET_FILE", "harbor.credentials"),
+    ):
+        monkeypatch.setattr(daemon_mod, attr, state_dir / filename)
 
     # Prevent the HTTP server from blocking; main() calls serve_forever().
     class _NoopServer:
@@ -882,6 +899,17 @@ def test_cli_roots_not_persisted_to_config(tmp_path, monkeypatch):
     monkeypatch.setattr("http.server.ThreadingHTTPServer", _NoopServer)
     # Suppress browser-open side effect
     monkeypatch.setattr("harbor.__main__._try_open_browser", lambda url: None)
+
+    # _run_server registers daemon._remove_pid via atexit.  monkeypatch undoes
+    # the path redirection above when this test ends, so a real atexit handler
+    # would run later against the *real* state paths and delete the developer's
+    # token/port files at interpreter exit.  Stub out the registration too.
+    class _NoAtexit:
+        @staticmethod
+        def register(fn):
+            pass
+
+    monkeypatch.setattr("harbor.__main__.atexit", _NoAtexit)
 
     monkeypatch.setattr(
         sys,
@@ -1494,3 +1522,185 @@ def test_refresh_once_preserves_snapshot_when_repos_rebound():
     # The stale result is discarded, but the last good snapshot survives — an
     # interrupting rescan publishes its own snapshot right after.
     assert app.repo_status == old_snapshot
+
+
+# ---------------------------------------------------------------------------
+# Rescan fetches remotes so refresh sees upstream commits
+# ---------------------------------------------------------------------------
+
+
+def test_rescan_fetches_remotes_before_status(monkeypatch, tmp_path):
+    """Rescan fetches before sampling status, so ahead/behind is upstream-true.
+
+    Regression: the refresh button only rescanned local state; `git status`
+    compares against local remote-tracking refs, so a repo whose remote had
+    new commits (visible with `git pull` in a terminal) stayed "up to date"
+    in the dashboard until something else fetched.
+    """
+    app = server.app_state
+    app.config_path = str(tmp_path / "config.toml")
+    app.roots = []
+    new_repos = {"r1": {"name": "r1", "path": "/r1"}}
+    order: list[tuple[str, list[str]]] = []
+    status = {"name": "r1", "path": "/r1", "dirty": False, "behind": 1}
+
+    monkeypatch.setattr(
+        server.scanner_mod, "scan_roots", lambda *a, **k: dict(new_repos)
+    )
+    monkeypatch.setattr(
+        server.git_ops,
+        "fetch_repos",
+        lambda repos: order.append(("fetch", list(repos))) or [],
+    )
+    monkeypatch.setattr(
+        server.git_ops,
+        "get_repos_status",
+        lambda repos: order.append(("status", list(repos))) or [status],
+    )
+
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    code, _ = _read_response(h)
+    assert code == 200
+
+    deadline = time.time() + 5
+    while app.scan_generation < 1 and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.scan_generation == 1
+    # Fetch has to happen first — otherwise status is computed from stale refs.
+    assert order == [("fetch", ["r1"]), ("status", ["r1"])]
+    assert app.repo_status["/r1"] == status
+
+
+def test_rescan_tolerates_fetch_failure(monkeypatch, tmp_path):
+    """One unreachable remote must not fail the whole refresh."""
+    app = server.app_state
+    app.config_path = str(tmp_path / "config.toml")
+    app.roots = []
+    status = {"name": "r1", "path": "/r1", "dirty": False, "behind": 0}
+
+    monkeypatch.setattr(
+        server.scanner_mod,
+        "scan_roots",
+        lambda *a, **k: {"r1": {"name": "r1", "path": "/r1"}},
+    )
+    monkeypatch.setattr(
+        server.git_ops,
+        "fetch_repos",
+        lambda repos: ["/r1: fatal: could not read from remote repository"],
+    )
+    monkeypatch.setattr(server.git_ops, "get_repos_status", lambda repos: [status])
+
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    code, _ = _read_response(h)
+    assert code == 200
+
+    deadline = time.time() + 5
+    while app.scan_generation < 1 and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.scan_generation == 1
+    assert app.last_scan_error is None  # a failed fetch is not a failed scan
+    assert app.repo_status["/r1"] == status
+
+
+def test_rescan_survives_unexpected_fetch_phase_error(monkeypatch, tmp_path):
+    """Even if fetch_repos itself raises, the refresh still publishes.
+
+    fetch_repos promises never to raise; this is the belt-and-braces guard in
+    _rescan_worker that keeps that promise from becoming a refresh outage.
+    """
+    app = server.app_state
+    app.config_path = str(tmp_path / "config.toml")
+    app.roots = []
+    status = {"name": "r1", "path": "/r1", "dirty": False, "behind": 0}
+
+    monkeypatch.setattr(
+        server.scanner_mod,
+        "scan_roots",
+        lambda *a, **k: {"r1": {"name": "r1", "path": "/r1"}},
+    )
+
+    def _boom(repos):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(server.git_ops, "fetch_repos", _boom)
+    monkeypatch.setattr(server.git_ops, "get_repos_status", lambda repos: [status])
+
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    code, _ = _read_response(h)
+    assert code == 200
+
+    deadline = time.time() + 5
+    while app.scan_generation < 1 and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.scan_generation == 1
+    assert app.last_scan_error is None
+    assert app.repo_status["/r1"] == status
+
+
+def test_rescan_fetch_can_be_disabled_via_config(monkeypatch, tmp_path):
+    """`fetch = false` in the config file disables the rescan fetch phase."""
+    config_path = tmp_path / "config.toml"
+    config_mod.save_config(str(config_path), {"fetch": False})
+    # save_config must round-trip the new key, otherwise the toggle silently
+    # disappears the next time the UI saves roots.
+    assert config_mod.load_config(config_path)["fetch"] is False
+
+    app = server.app_state
+    app.config_path = str(config_path)
+    app.roots = []
+    app.fetch_on_scan = True
+
+    def _must_not_fetch(repos):
+        raise AssertionError("fetch_repos called despite fetch = false")
+
+    status = {"name": "r1", "path": "/r1", "dirty": False, "behind": 0}
+    monkeypatch.setattr(
+        server.scanner_mod,
+        "scan_roots",
+        lambda *a, **k: {"r1": {"name": "r1", "path": "/r1"}},
+    )
+    monkeypatch.setattr(server.git_ops, "fetch_repos", _must_not_fetch)
+    monkeypatch.setattr(server.git_ops, "get_repos_status", lambda repos: [status])
+
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    code, _ = _read_response(h)
+    assert code == 200
+
+    deadline = time.time() + 5
+    while app.scan_generation < 1 and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.scan_generation == 1
+    # The toggle was applied *and* the fetch phase was actually skipped even
+    # though a repo was found (the guard above would have fired otherwise).
+    assert app.fetch_on_scan is False
+    assert app.repo_status["/r1"] == status
+
+
+def test_pull_all_refreshes_status_snapshot(monkeypatch):
+    """After a pull-all job, the cached snapshot reflects the new branch state.
+
+    The frontend calls loadRepos() as soon as it sees the job's "done" event;
+    without a snapshot refresh it would render pre-pull ahead/behind counts
+    until the next 30s status tick.
+    """
+    app = server.app_state
+    repos = {"/r1": {"name": "r1", "path": "/r1"}}
+    app.repos = repos
+    stale = {"name": "r1", "path": "/r1", "dirty": False, "behind": 1}
+    app.repo_status = {"/r1": stale}
+    pulled = {"name": "r1", "path": "/r1", "dirty": False, "behind": 0}
+
+    def fake_pull(repo, q):
+        q.put({"repo": repo["name"], "status": "success", "message": "up to date"})
+
+    monkeypatch.setattr(server.git_ops, "pull_one", fake_pull)
+    monkeypatch.setattr(server.git_ops, "get_repos_status", lambda r: [pulled])
+
+    job_id = server.start_pull_all_job(repos)
+    seen = _drain_queue(job_id)
+    assert any(item.get("done") for item in seen)
+    assert app.repo_status == {"/r1": pulled}

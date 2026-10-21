@@ -27,6 +27,7 @@ It's also intentionally simple: one Python package + a self-contained HTML front
 ## Features
 
 - **Multi-repo overview** — see every repo's branch, dirty/clean state, and ahead/behind count at a glance
+- **Refresh that really syncs** — the refresh button rescans roots *and* runs `git fetch` in every repo, so ahead/behind reflects what is actually upstream (a commit pushed by a teammate shows up as "1 behind", just like with a manual `git pull`). Disable with `fetch = false`.
 - **Batch Pull** — `git pull --ff-only` across all repos concurrently with real-time SSE progress
 - **Stash / Discard / Checkout main** — common operations on individual repos or in bulk
 - **Diff preview** — view uncommitted changes before discarding
@@ -164,6 +165,7 @@ Settings are resolved in priority order: **CLI flag > environment variable > con
 | `--max-depth` | `HARBOR_MAX_DEPTH` | `max_depth` | `5` |
 | `--config` | `HARBOR_CONFIG` | — | `~/.config/harbor/config.toml` |
 | `--no-browser` | — | — | opens browser |
+| — | — | `fetch` | `true` |
 
 The config file is TOML. Scan roots are stored as an array of tables:
 
@@ -171,6 +173,9 @@ The config file is TOML. Scan roots are stored as an array of tables:
 port = 8765
 min_depth = 1
 max_depth = 5
+# Refresh runs `git fetch` in every repo so ahead/behind is upstream-true.
+# Set to false to keep refreshes offline-only.
+fetch = true
 
 [[roots]]
 path = "/Users/you/work"
@@ -296,6 +301,8 @@ reverse-proxy Harbor to an untrusted network.
 ## How it works
 
 Harbor scans the given root directory for `.git` subdirectories using `os.walk` (cross-platform). For each repo it runs `git` commands to determine status, then serves the results as a JSON API. The frontend is a single-page HTML file that talks to this API, with SSE for real-time pull progress.
+
+Clicking **Refresh** also runs `git fetch` in every repo (concurrently, bounded per repo and ~20s overall) before sampling status, so ahead/behind is measured against what actually exists upstream rather than the clone's last-known remote refs. A fetch failure (offline, no remote, auth prompt) never fails the refresh — that repo falls back to its local state.
 
 For architecture details and project structure, see [CONTRIBUTING.md](CONTRIBUTING.md#project-structure).
 

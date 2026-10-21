@@ -34,6 +34,9 @@ class HarborApp:
         max_depth: Maximum directory depth for repo scanning.
         cli_min_depth: When set, overrides ``min_depth`` from config file.
         cli_max_depth: When set, overrides ``max_depth`` from config file.
+        fetch_on_scan: When true, rescans run ``git fetch`` in every repo
+            before computing status so ahead/behind reflects upstream; set by
+            the config file key ``fetch`` (default true).
         auth_token: The launch token (one-time entry credential).  ``None``
             disables authentication (tests / no-auth mode).
         session_secret: HMAC key that signs web-session cookies.  ``None``
@@ -82,6 +85,11 @@ class HarborApp:
     # CLI args take priority and aren't hot-reloaded from config file.
     cli_min_depth: int | None = None
     cli_max_depth: int | None = None
+
+    # Rescans run `git fetch` before sampling status so ahead/behind reflects
+    # upstream instead of stale local remote-tracking refs.  Hot-reloaded from
+    # the config file key `fetch` (default on).
+    fetch_on_scan: bool = True
 
     # --- authentication ---
     auth_token: str | None = None

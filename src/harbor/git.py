@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -70,8 +70,17 @@ class ActionOutcome:
 # iCloud placeholder file, credential prompt, index.lock contention) from
 # blocking an API request forever.
 GIT_TIMEOUT = 10
-# Network operations (git pull) may legitimately take longer on slow links.
+# Network operations (git pull / fetch) may legitimately take longer on slow
+# links.  Fetches are bounded tighter than pulls: a rescan fans out over every
+# repo, so one hanging remote must not hold the refresh button hostage.
 PULL_TIMEOUT = 120
+FETCH_TIMEOUT = 20
+FETCH_WORKERS = 8
+# Overall wall-clock cap for one rescan's fetch phase.  Per-repo timeouts alone
+# still allow ceil(N/FETCH_WORKERS) * FETCH_TIMEOUT (e.g. 30 repos on a dead
+# network -> 80s), which would hold the refresh button long past the frontend's
+# 30s budget.  Repos that miss the budget fall back to local refs.
+FETCH_BUDGET = 20.0
 
 
 def _git_env() -> dict[str, str]:
@@ -232,6 +241,93 @@ def _repo_name(repo: Repo | dict[str, Any]) -> str:
     if isinstance(repo, Repo):
         return repo.name
     return str(repo["name"])
+
+
+def fetch_remote(path: str, timeout: float = FETCH_TIMEOUT) -> str | None:
+    """Run ``git fetch --quiet`` in *path*; return a short error string or None.
+
+    ``git status --porcelain=v2 --branch`` derives ahead/behind from the
+    *local* remote-tracking refs, so without a fetch a repo whose upstream has
+    new commits still looks "up to date" — the dashboard is blind to anything
+    that happened on the remote since the last manual ``git pull``/fetch.
+    Rescans call this before sampling status so the page reports what actually
+    exists upstream, matching what a terminal ``git pull`` would see.
+
+    Failures (no remote, offline, auth) are returned, not raised: local status
+    is still useful and one broken remote must not fail the whole refresh.
+    """
+    rc, out, err = run_git(path, "fetch", "--quiet", timeout=timeout)
+    if rc == 0:
+        return None
+    detail = (err or out).strip() or "git fetch failed"
+    # Collapse multi-line git errors into one line for the compact failure log.
+    return " ".join(detail.split())[:300]
+
+
+def fetch_repos(
+    repos: dict[str, Any], timeout: float = FETCH_TIMEOUT, budget: float = FETCH_BUDGET
+) -> list[str]:
+    """Fetch every repo concurrently, returning ``"<path>: <error>"`` failures.
+
+    Never raises: a malformed record, an offline/remote-less/credential-
+    prompting repo, or a fetch that overruns the overall *budget* is reported
+    as a failure and the rescan continues with local refs.
+
+    *timeout* bounds a single ``git fetch``; *budget* bounds the whole phase in
+    wall-clock seconds so a dead network cannot stall the refresh button (or
+    the rescan single-flight) for ``ceil(N/FETCH_WORKERS) * timeout``.
+    """
+    if not repos:
+        return []
+
+    def _one(repo: Repo | dict[str, Any]) -> tuple[str, str | None]:
+        try:
+            path = _repo_path(repo)
+        except Exception:  # malformed record — can't even name the repo
+            return repr(repo), "invalid repo record (no path)"
+        try:
+            return path, fetch_remote(path, timeout=timeout)
+        except Exception as exc:  # defensive belt-and-braces around run_git
+            return path, f"{type(exc).__name__}: {exc}"
+
+    failures: list[str] = []
+    pool = ThreadPoolExecutor(max_workers=FETCH_WORKERS)
+    try:
+        submitted: list[tuple[Future[tuple[str, str | None]], str]] = []
+        for repo in repos.values():
+            try:
+                label = _repo_path(repo)
+            except Exception:
+                label = repr(repo)
+            try:
+                submitted.append((pool.submit(_one, repo), label))
+            except Exception as exc:  # e.g. "can't start new thread"
+                failures.append(f"{label}: {type(exc).__name__}: {exc}")
+        done, not_done = wait([fut for fut, _ in submitted], timeout=budget)
+        labels = {id(fut): label for fut, label in submitted}
+        for fut in done:
+            try:
+                path, error = fut.result()
+            except Exception as exc:  # cancelled/broken future
+                failures.append(
+                    f"{labels.get(id(fut), '<unknown>')}: {type(exc).__name__}: {exc}"
+                )
+            else:
+                if error:
+                    failures.append(f"{path}: {error}")
+        for fut in not_done:
+            fut.cancel()
+            failures.append(
+                f"{labels.get(id(fut), '<unknown>')}: skipped "
+                f"(overall fetch budget of {budget:g}s exceeded)"
+            )
+    except Exception as exc:  # never let the fetch phase break a refresh
+        failures.append(f"<fetch phase>: {type(exc).__name__}: {exc}")
+    finally:
+        # Do not block the rescan on stragglers: their own subprocess timeout
+        # still bounds them and the pool threads unwind on their own.
+        pool.shutdown(wait=False, cancel_futures=True)
+    return failures
 
 
 def safe_pull_check(path: str) -> tuple[bool, str]:

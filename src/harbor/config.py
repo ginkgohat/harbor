@@ -32,7 +32,7 @@ _LEGACY_CONFIG_PATH = _LEGACY_CONFIG_DIR / "config.toml"
 # Top-level keys recognized by save_config.  Anything else in the config
 # dict is preserved silently (unknown keys would be dropped on save), so we
 # log a warning to make the loss observable.
-_KNOWN_KEYS = {"port", "min_depth", "max_depth", "roots"}
+_KNOWN_KEYS = {"port", "min_depth", "max_depth", "fetch", "roots"}
 
 
 def load_config(path: str | Path) -> dict[str, Any] | None:
@@ -84,7 +84,7 @@ def migrate_legacy_config() -> None:
 def save_config(path: str | Path, config: dict[str, Any]) -> None:
     """Write a config dict to a TOML file using tomli_w.
 
-    Only the keys Harbor knows about (port, min_depth, max_depth, roots)
+    Only the keys Harbor knows about (port, min_depth, max_depth, fetch, roots)
     are written back.  Any other top-level keys are dropped — a warning
     is logged so this is not entirely silent.
 
@@ -104,7 +104,7 @@ def save_config(path: str | Path, config: dict[str, Any]) -> None:
     # Build a clean dict with only recognized keys, preserving the order
     # that makes the config file readable (scalars first, then roots table).
     clean: dict[str, Any] = {}
-    for key in ("port", "min_depth", "max_depth"):
+    for key in ("port", "min_depth", "max_depth", "fetch"):
         if key in config:
             clean[key] = config[key]
     if "roots" in config:
