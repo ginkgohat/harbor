@@ -40,7 +40,7 @@ dev = [
     "twine",
     "mypy",
     "pre-commit",
-    "hypothesis>=6.168.0",
+    "hypothesis>=6.168.5",
     # Pinned so the CI e2e job can use the official Playwright Python image
     # (mcr.microsoft.com/playwright/python:<same version>) whose Chromium is
     # pre-installed — `playwright install` then becomes a no-op.  On a mismatch
