@@ -536,10 +536,11 @@ def _sweep_stale_jobs() -> int:
 def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
     """Start a background pull-all job and return its job_id."""
     _sweep_stale_jobs()
+    app = app_state
     job_id = uuid.uuid4().hex
     q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=MAX_SSE_QUEUE_EVENTS)
-    with app_state.jobs_lock:
-        app_state.jobs[job_id] = {"queue": q, "created": time.monotonic()}
+    with app.jobs_lock:
+        app.jobs[job_id] = {"queue": q, "created": time.monotonic()}
 
     def worker() -> None:
         try:
@@ -554,6 +555,14 @@ def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
                     except Exception as exc:
                         q.put({"error": str(exc), "repo": "<unknown>"})
         finally:
+            # Pulls changed local branches; recompute the cached status
+            # snapshot before signalling completion.  The frontend calls
+            # loadRepos() as soon as it sees "done" — without this it would
+            # render the pre-pull ahead/behind counts until the next 30s tick.
+            try:
+                _refresh_once(app)
+            except Exception:  # belt-and-braces: "done" must always be emitted
+                logger.exception("pull-all: status refresh failed")
             # Always emit "done" so the SSE consumer can clean up the job
             # entry, even when something above raised before the loop
             # finished.
@@ -680,9 +689,34 @@ def _rescan_worker(app: HarborApp) -> None:
                 app.min_depth = config.get("min_depth", app.min_depth)
             if app.cli_max_depth is None:
                 app.max_depth = config.get("max_depth", app.max_depth)
+            fetch_setting = config.get("fetch")
+            if isinstance(fetch_setting, bool):
+                app.fetch_on_scan = fetch_setting
             new_repos = scanner_mod.scan_roots(
                 app.roots, min_depth=app.min_depth, max_depth=app.max_depth
             )
+            # Refresh remote-tracking refs first: `git status` reports
+            # ahead/behind relative to them, so without a fetch the dashboard
+            # cannot see commits that landed upstream (what `git pull` shows).
+            # A failed fetch is non-fatal — the repo's local status is still
+            # useful and one unreachable remote must not fail the refresh.
+            if app.fetch_on_scan and new_repos:
+                try:
+                    fetch_failures = git_ops.fetch_repos(new_repos)
+                except Exception:
+                    # fetch_repos promises never to raise; keep the refresh
+                    # working even if that promise is ever broken.
+                    logger.exception("rescan: fetch phase failed; using local refs")
+                else:
+                    if fetch_failures:
+                        logger.info(
+                            "rescan: fetched %d/%d repo(s); %d failed (using "
+                            "local refs): %s",
+                            len(new_repos) - len(fetch_failures),
+                            len(new_repos),
+                            len(fetch_failures),
+                            "; ".join(fetch_failures[:3]),
+                        )
             # Pre-compute the status snapshot for the new set so the frontend's
             # post-rescan /api/repos poll is instant (no on-demand blocking).
             statuses = git_ops.get_repos_status(new_repos)

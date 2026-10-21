@@ -561,6 +561,74 @@ def test_refresh_button_applies_new_repo(page, server_url, repo_root):
     )
 
 
+def _git(*args, cwd=None):
+    """Run a git command for the e2e remote-update fixture."""
+    subprocess.run(list(args), cwd=cwd, capture_output=True, check=True)
+
+
+def test_refresh_detects_new_remote_commits(page, server_url, repo_root):
+    """Clicking refresh makes commits pushed to a remote visible in the UI.
+
+    Regression: `git status` derives ahead/behind from local remote-tracking
+    refs, so the dashboard used to keep showing a repo as up to date even
+    after new commits landed upstream — the user could see them with a manual
+    `git pull`, but the refresh button "didn't notice".  The rescan now
+    fetches remotes before sampling status.
+    """
+    base_url, token = server_url
+
+    # A remote with one clone tracking it, created while the page is open.
+    origin = repo_root / "origin.git"
+    _git("git", "init", "--bare", "-b", "main", str(origin))
+    seed = repo_root / "seed"
+    _git("git", "clone", str(origin), str(seed))
+    (seed / "a.txt").write_text("one\n")
+    _git("git", "add", ".", cwd=str(seed))
+    _git(
+        "git",
+        "-c",
+        "user.email=test@test",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "-m",
+        "c1",
+        cwd=str(seed),
+    )
+    _git("git", "push", "-u", "origin", "main", cwd=str(seed))
+    work = repo_root / "repo-remote"
+    _git("git", "clone", str(origin), str(work))
+
+    page.goto(f"{base_url}/?token={token}")
+    page.wait_for_selector("#stats", timeout=5000)
+
+    # New upstream commit after the page loaded — local clone hasn't fetched.
+    (seed / "a.txt").write_text("one\ntwo\n")
+    _git(
+        "git",
+        "-c",
+        "user.email=test@test",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "-am",
+        "c2",
+        cwd=str(seed),
+    )
+    _git("git", "push", cwd=str(seed))
+
+    page.locator("#refreshBtn").click()
+
+    page.wait_for_function(
+        """() => {
+            const card = document.querySelector('.card[data-name="repo-remote"]');
+            const tag = card && card.querySelector('.tag.behind');
+            return !!tag && tag.textContent.includes('1');
+        }""",
+        timeout=20000,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Settings modal
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ Harbor 就是为这而生的。它是个小面板，**一眼看完所有仓库�
 ## 功能
 
 - **多仓库总览** — 一眼看清每个仓库的分支、有无未提交改动、ahead/behind 状态
+- **刷新会真正同步远程** — 刷新按钮会重新扫描目录，并对每个仓库执行 `git fetch`，ahead/behind 反映远端真实状态（同事推了新提交会显示成「落后 1」，和手动 `git pull` 看到的一致）。可用 `fetch = false` 关闭。
 - **批量 Pull** — 并发 `git pull --ff-only`，实时 SSE 进度推送
 - **Stash / 丢弃 / 切 main** — 单个或批量执行常用操作
 - **改动预览** — 丢弃前查看 diff，避免误操作
@@ -161,6 +162,7 @@ make clean    # 清理构建产物
 | `--max-depth` | `HARBOR_MAX_DEPTH` | `max_depth` | `5` |
 | `--config` | `HARBOR_CONFIG` | — | `~/.config/harbor/config.toml` |
 | `--no-browser` | — | — | 自动打开浏览器 |
+| — | — | `fetch` | `true` |
 
 配置文件格式为 TOML。扫描根目录以表数组的形式存储：
 
@@ -168,6 +170,9 @@ make clean    # 清理构建产物
 port = 8765
 min_depth = 1
 max_depth = 5
+# 刷新时对每个仓库执行 `git fetch`，让 ahead/behind 反映远端真实状态。
+# 设为 false 可让刷新只读本地状态（离线或仓库很大时有用）。
+fetch = true
 
 [[roots]]
 path = "/Users/you/work"
@@ -276,6 +281,8 @@ Harbor 仅绑定 `127.0.0.1`，且**没有身份验证**——任何能本地访
 ## 工作原理
 
 Harbor 用 `os.walk` 扫描指定目录下的 `.git` 子目录（跨平台兼容）。对每个仓库执行 `git` 命令获取状态，以 JSON API 形式提供给前端。前端是单个 HTML 文件，通过 SSE 获取实时 pull 进度。
+
+点击 **刷新** 时，还会在采样状态之前对每个仓库并发执行 `git fetch`（单仓库有时限、整段 fetch 约 20s 上限），因此 ahead/behind 是相对远端真实状态计算的，而不是本地缓存的远程引用。某个仓库 fetch 失败（离线、没有 remote、认证弹窗）不会让整次刷新失败，该仓库回退到本地状态。
 
 ## 同类工具
 

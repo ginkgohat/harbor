@@ -10,6 +10,29 @@ import pytest
 from harbor import daemon, selfmanage
 
 
+@pytest.fixture(autouse=True)
+def _isolated_daemon_state(tmp_path, monkeypatch):
+    """Redirect Harbor's on-disk daemon state files to a temp dir.
+
+    Several tests exercise ``_remove_pid`` / ``cmd_status`` / ``cmd_stop``
+    while patching only ``PID_FILE`` — but the real helpers also unlink
+    ``TOKEN_FILE`` and ``PORT_FILE``.  Without this fixture an ordinary
+    ``pytest`` run deletes the developer's own
+    ``~/Library/Application Support/harbor/harbor.token`` and ``harbor.port``,
+    silently breaking ``harbor status`` / ``harbor stop`` for a running
+    instance.  Redirect every state path so tests can never touch the real one.
+    """
+    for attr, filename in (
+        ("STATE_DIR", "state"),
+        ("PID_FILE", "harbor.pid"),
+        ("LOG_FILE", "harbor.log"),
+        ("TOKEN_FILE", "harbor.token"),
+        ("PORT_FILE", "harbor.port"),
+        ("SESSION_SECRET_FILE", "harbor.credentials"),
+    ):
+        monkeypatch.setattr(daemon, attr, tmp_path / filename)
+
+
 def _unexpected_pip(*_args):
     """Fail a test if the code under test tries to run pip."""
     raise AssertionError("pip must not run in this environment")

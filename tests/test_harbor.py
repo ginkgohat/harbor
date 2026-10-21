@@ -14,6 +14,8 @@ from harbor.config import load_config, resolve_roots, save_config
 from harbor.git import (
     ActionOutcome,
     do_action,
+    fetch_remote,
+    fetch_repos,
     parse_porcelain_v2,
     repo_status,
     run_git,
@@ -966,3 +968,130 @@ def test_do_action_outcome_as_dict(tmp_path):
     assert "ok" in d
     assert "output" in d
     assert isinstance(d["ok"], bool)
+
+
+# ---------------------------------------------------------------------------
+# Remote fetch (refresh must see upstream commits)
+# ---------------------------------------------------------------------------
+
+
+def _make_origin_and_clones(tmp_path, name="origin.git"):
+    """Create a bare origin, a seed clone that can push, and a work clone."""
+    origin = tmp_path / name
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(origin)],
+        check=True,
+        capture_output=True,
+    )
+    seed = tmp_path / "seed"
+    subprocess.run(
+        ["git", "clone", str(origin), str(seed)], check=True, capture_output=True
+    )
+    # Repo-local identity so the test does not depend on the machine's global
+    # git config (CI runners/fresh machines have none, and `commit` would fail).
+    for key, value in (("user.email", "t@t"), ("user.name", "T")):
+        subprocess.run(
+            ["git", "-C", str(seed), "config", key, value],
+            check=True,
+            capture_output=True,
+        )
+    (seed / "a.txt").write_text("one\n")
+    subprocess.run(
+        ["git", "-C", str(seed), "add", "."], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(seed), "commit", "-m", "c1"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(seed), "push", "-u", "origin", "main"],
+        check=True,
+        capture_output=True,
+    )
+    work = tmp_path / "work"
+    subprocess.run(
+        ["git", "clone", str(origin), str(work)], check=True, capture_output=True
+    )
+    return origin, seed, work
+
+
+def test_fetch_repos_updates_remote_tracking_refs(tmp_path):
+    """fetch_repos makes new upstream commits visible to repo_status.
+
+    This is the core of the refresh fix: `git status --branch` only knows
+    about the *local* remote-tracking refs, so without fetching, a repo whose
+    remote moved ahead still looked up to date in the dashboard.
+    """
+    _, seed, work = _make_origin_and_clones(tmp_path)
+    repo = {"name": "work", "path": str(work)}
+
+    assert repo_status(repo)["behind"] == 0  # clone is up to date
+
+    # A new commit lands upstream; the local clone does not know about it yet.
+    (seed / "a.txt").write_text("one\ntwo\n")
+    subprocess.run(
+        ["git", "-C", str(seed), "commit", "-am", "c2"], check=True, capture_output=True
+    )
+    subprocess.run(["git", "-C", str(seed), "push"], check=True, capture_output=True)
+    assert repo_status(repo)["behind"] == 0  # stale local refs — the bug
+
+    failures = fetch_repos({"work": repo})
+    assert failures == []
+    assert repo_status(repo)["behind"] == 1  # now the dashboard can see it
+
+
+def test_fetch_repos_reports_failures_without_raising(tmp_path):
+    """A broken remote is reported, never raised."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    subprocess.run(["git", "init", str(plain)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(plain),
+            "remote",
+            "add",
+            "origin",
+            str(tmp_path / "gone.git"),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    repo = {"name": "plain", "path": str(plain)}
+
+    failures = fetch_repos({"plain": repo})
+    assert len(failures) == 1
+    assert str(plain) in failures[0]
+
+
+def test_fetch_remote_returns_error_for_broken_path(tmp_path):
+    """fetch_remote degrades a failed git command to an error string."""
+    assert fetch_remote(str(tmp_path / "does-not-exist")) is not None
+
+
+def test_fetch_repos_empty_dict():
+    assert fetch_repos({}) == []
+
+
+def test_fetch_repos_respects_overall_budget(monkeypatch):
+    """A dead network must not hold the refresh for N/workers * timeout."""
+    import harbor.git as git_mod
+
+    def slow(path, timeout=None):
+        time.sleep(0.4)
+        return None
+
+    monkeypatch.setattr(git_mod, "fetch_remote", slow)
+    repos = {str(i): {"name": str(i), "path": str(i)} for i in range(20)}
+    started = time.monotonic()
+    failures = fetch_repos(repos, budget=0.15)
+    elapsed = time.monotonic() - started
+    assert elapsed < 5, f"overall fetch budget ignored; took {elapsed:.1f}s"
+    assert any("budget" in failure for failure in failures)
+
+
+def test_fetch_repos_tolerates_malformed_records():
+    """A record without a path is reported, never raised."""
+    failures = fetch_repos({"bad": {"name": "no-path"}})
+    assert len(failures) == 1
+    assert "invalid repo record" in failures[0]
