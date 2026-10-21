@@ -276,6 +276,29 @@ def _run_server(args: argparse.Namespace) -> int:
         datefmt="%H:%M:%S",
     )
 
+    # --- Refuse to double-start against a running instance -------------
+    # PID/port/token are process-wide singletons: a second instance would
+    # overwrite them and, on exit (including a failed startup), delete them —
+    # leaving the instance that is actually serving without working
+    # `harbor status` / `harbor stop`.  Daemon mode writes its own PID before
+    # calling us, hence the self-PID check.
+    from . import daemon as _daemon_mod
+
+    existing_pid = _daemon_mod._read_pid()
+    if (
+        existing_pid
+        and existing_pid != os.getpid()
+        and _daemon_mod._is_process_alive(existing_pid)
+    ):
+        logger.error(
+            "Harbor is already running (PID %d).\n"
+            "  → Open it with:        harbor status   (prints the URL)\n"
+            "  → Restart it with:     harbor stop && harbor start\n"
+            "  → Or use another port: harbor --port <number>",
+            existing_pid,
+        )
+        return 1
+
     # --- Load config --------------------------------------------------
     config = config_mod.load_config(args.config)
 
@@ -349,6 +372,12 @@ def _run_server(args: argparse.Namespace) -> int:
     )
     # Share state with the server module (read by every Handler instance).
     server_mod.app_state = state
+
+    # Bind before touching the state files: if the port is taken (e.g. another
+    # Harbor already serving), _create_server exits here and the running
+    # instance's PID/token/port files are left untouched.
+    httpd = _create_server(port)
+
     # Background repo-status refresher: /api/repos serves a cached snapshot
     # instead of blocking on per-repo git subprocesses on every request.
     server_mod.start_status_refresher(state)
@@ -363,8 +392,6 @@ def _run_server(args: argparse.Namespace) -> int:
     # foreground and daemon mode.  In daemon mode the PID file was already
     # written by daemon.py — overwriting with the same value is fine.
     try:
-        from . import daemon as _daemon_mod
-
         _daemon_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
         # PID file (0644 — harmless, just a number)
         _daemon_mod.PID_FILE.write_text(str(os.getpid()))
@@ -416,7 +443,6 @@ def _run_server(args: argparse.Namespace) -> int:
 
         signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    httpd = _create_server(port)
     url = f"http://127.0.0.1:{port}/?token={token}"
     logger.info("serving at http://127.0.0.1:%d/?token=<hidden>", port)
     logger.info(
