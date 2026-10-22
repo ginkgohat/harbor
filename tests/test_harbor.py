@@ -823,13 +823,61 @@ def test_create_server_port_in_use_exits_with_friendly_message(caplog):
 
     assert "Port 8765 is already in use" in caplog.text
     assert "harbor --port <number>" in caplog.text
-    assert "lsof -i :8765" in caplog.text
+    # The "who owns this port?" hint has to match the platform's tooling.
+    if os.name == "nt":
+        assert "netstat -ano | findstr :8765" in caplog.text
+    else:
+        assert "lsof -i :8765" in caplog.text
 
 
 def test_create_server_port_in_use_by_message_text(caplog):
     """Some platforms may set errno differently but include the message text."""
     with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
         mock_cls.side_effect = OSError(99, "Address already in use")
+        with pytest.raises(SystemExit) as exc_info:
+            _create_server(8765)
+        assert exc_info.value.code == 1
+
+    assert "Port 8765 is already in use" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("errno_value", "message"),
+    [
+        # Windows: WSAEADDRINUSE — "Only one usage of each socket address ..."
+        (10048, "Only one usage of each socket address is normally permitted"),
+        # Windows: WSAEACCES — port in an excluded range / held exclusively.
+        # Seen on GitHub's Windows runners when a second bind hits a busy port.
+        (
+            10013,
+            "An attempt was made to access a socket in a way forbidden by its "
+            "access permissions",
+        ),
+    ],
+)
+def test_create_server_windows_port_errors_exit_friendly(caplog, errno_value, message):
+    """Windows errno values for "port unavailable" must not leak a traceback.
+
+    ``_create_server`` used to special-case errno 48 (macOS) plus the POSIX
+    message text only, so a busy port on Windows raised PermissionError out of
+    ``harbor serve`` instead of the friendly "pick another port" error.
+    """
+    with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
+        mock_cls.side_effect = OSError(errno_value, message)
+        with pytest.raises(SystemExit) as exc_info:
+            _create_server(8765)
+        assert exc_info.value.code == 1
+
+    assert "Port 8765 is already in use" in caplog.text
+
+
+def test_create_server_winerror_is_recognised(caplog):
+    """On Windows the socket code can land in ``winerror``, not ``errno``."""
+    err = OSError(22, "Invalid argument")
+    err.winerror = 10048  # type: ignore[attr-defined]
+
+    with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
+        mock_cls.side_effect = err
         with pytest.raises(SystemExit) as exc_info:
             _create_server(8765)
         assert exc_info.value.code == 1

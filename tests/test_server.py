@@ -1,5 +1,6 @@
 """Tests for harbor.server — routing, JSON body parsing, auth, and pull-all worker."""
 
+import errno
 import http.server
 import io
 import json
@@ -995,36 +996,39 @@ def test_failed_start_leaves_running_instance_state_files_untouched(
     # No live pid in the state dir, so the double-start guard lets us through.
     monkeypatch.setattr(daemon_mod, "_read_pid", lambda: None)
 
-    # Occupy a port with an unrelated listener to force the bind to fail.
-    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    blocker.bind(("127.0.0.1", 0))
-    blocker.listen(1)
-    port = blocker.getsockname()[1]
-    try:
-        registered = []
+    # Force the bind to fail deterministically instead of occupying a real
+    # socket: on Windows the second bind reports WSAEACCES (10013) rather than
+    # WSAEADDRINUSE, and with SO_REUSEADDR it can even succeed — either way the
+    # test would be flaky or hang.  _create_server's errno mapping itself is
+    # covered by the port-in-use unit tests.
+    def _busy_port(*args, **kwargs):
+        raise OSError(errno.EADDRINUSE, "Address already in use")
 
-        class _NoAtexit:
-            @staticmethod
-            def register(fn):
-                registered.append(fn)
+    monkeypatch.setattr("harbor.__main__.http.server.ThreadingHTTPServer", _busy_port)
 
-        monkeypatch.setattr("harbor.__main__.atexit", _NoAtexit)
+    registered = []
 
-        args = _build_parser().parse_args(
-            [
-                "serve",
-                str(tmp_path),
-                "--config",
-                str(tmp_path / "config.toml"),
-                "--port",
-                str(port),
-                "--no-browser",
-            ]
-        )
-        with pytest.raises(SystemExit):
-            _run_server(args)
-    finally:
-        blocker.close()
+    class _NoAtexit:
+        @staticmethod
+        def register(fn):
+            registered.append(fn)
+
+    monkeypatch.setattr("harbor.__main__.atexit", _NoAtexit)
+
+    args = _build_parser().parse_args(
+        [
+            "serve",
+            str(tmp_path),
+            "--config",
+            str(tmp_path / "config.toml"),
+            "--port",
+            "8765",
+            "--no-browser",
+        ]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        _run_server(args)
+    assert exc_info.value.code == 1
 
     # The failed startup neither registered the atexit cleanup...
     assert registered == []

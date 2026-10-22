@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import errno
 import http.server
 import logging
 import os
@@ -44,6 +45,38 @@ TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 END_OF_OPTIONS = "--"
 
 
+#: errno values that mean "this port cannot be bound because it is taken".
+#: POSIX reports ``EADDRINUSE`` (48 on macOS/BSD, 98 on Linux).  Windows
+#: reports ``WSAEADDRINUSE`` as errno 10048, and — when the port sits in an
+#: excluded/reserved range or is held with exclusive access — ``WSAEACCES`` as
+#: errno 10013.  From the user's point of view all of them mean "the port is
+#: not available, pick another one", so they share one friendly error instead
+#: of leaking a traceback.
+_PORT_TAKEN_ERRNOS = {errno.EADDRINUSE, 10048, 10013}
+_PORT_TAKEN_WINERRORS = {10048, 10013}
+
+
+def _is_port_taken_error(exc: OSError) -> bool:
+    """Return True if *exc* from ``bind()`` means the port is unavailable."""
+    if exc.errno in _PORT_TAKEN_ERRNOS:
+        return True
+    # ``winerror`` only exists on Windows, and only sometimes matches errno.
+    if getattr(exc, "winerror", None) in _PORT_TAKEN_WINERRORS:
+        return True
+    text = str(exc).lower()
+    return (
+        "address already in use" in text
+        or "only one usage of each socket address" in text
+    )
+
+
+def _port_owner_hint(port: int) -> str:
+    """Return a platform-appropriate command for finding the port's owner."""
+    if os.name == "nt":
+        return f"netstat -ano | findstr :{port}"
+    return f"lsof -i :{port}"
+
+
 def _create_server(port: int) -> http.server.ThreadingHTTPServer:
     """Create and return a ThreadingHTTPServer bound to *port*.
 
@@ -53,15 +86,15 @@ def _create_server(port: int) -> http.server.ThreadingHTTPServer:
     try:
         return http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     except OSError as e:
-        if e.errno == 48 or "Address already in use" in str(e):
+        if _is_port_taken_error(e):
             logger.error(
                 "Port %d is already in use by another process.\n"
                 "  → Try a different port with:  harbor --port <number>\n"
                 "  → Or find and stop the process using port %d:\n"
-                "       lsof -i :%d",
+                "       %s",
                 port,
                 port,
-                port,
+                _port_owner_hint(port),
             )
             sys.exit(1)
         raise
