@@ -372,12 +372,36 @@ Feature requests are welcome! Before opening one:
 
 (For maintainers)
 
-1. Bump the version in `src/harbor/__init__.py`
-2. Update the changelog if applicable
-3. Commit and tag: `git tag v0.x.x`
-4. Push: `git push --tags`
-5. Build: `python -m build`
-6. Upload to PyPI: `twine upload dist/*`
+The git tag **is** the version.  `setuptools-scm` writes `src/harbor/_version.py`
+at build time, so `v0.1.2` builds as `harbor 0.1.2` — nothing in
+`src/harbor/__init__.py` needs editing, and there is no changelog file: GitHub
+generates the release notes from the merged pull requests.
+
+1. Make sure `main` is green and contains everything you want to ship.
+2. Pick the tag from the dev version your checkout reports: `0.1.2.dev22`
+   means the next release is `v0.1.2` (`X.Y.Z.devN` → `vX.Y.Z`).
+3. Tag the `main` commit and push the tag: `git tag v0.x.y && git push origin v0.x.y`
+4. The [`release.yml`](.github/workflows/release.yml) workflow then runs the
+   test suite, builds the sdist + wheel, and creates the GitHub Release with
+   those artifacts attached.
+5. Check the release page lists `harbor-X.Y.Z-py3-none-any.whl` and
+   `harbor-X.Y.Z.tar.gz`.
+6. Users pick it up with `harbor update` (which runs `pipx upgrade harbor`)
+   followed by `harbor stop && harbor start`.
+
+There is no manual `python -m build` step and no PyPI upload: the name `harbor`
+on PyPI belongs to an unrelated project, so GitHub — plus `pipx install` /
+`harbor update` — is the distribution channel.
+
+After the release, `main` reports `X.Y.(Z+1).devN` again; that is the next
+release's lineage, not a regression.
+
+If you tagged the wrong commit or pushed a wrong version number:
+
+```bash
+gh release delete vX.Y.Z --cleanup-tag   # delete the Release and its tag
+git tag -d vX.Y.Z                        # delete the local tag too
+```
 
 ---
 

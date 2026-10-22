@@ -60,7 +60,7 @@ pipx ensurepath                      # 之后请打开新的终端
 pipx install "git+https://github.com/ginkgohat/harbor.git"
 
 # 4. 验证
-harbor --version                     # → harbor 0.1.2.dev9+g...
+harbor --version                     # → harbor 0.1.3.dev9+g...
 ```
 
 ### 装进独立的 virtualenv（备选）
@@ -259,7 +259,7 @@ make dev
 
 Harbor 的版本号由 `setuptools-scm` 根据 pip 构建的那份 clone 里的 git tag 推导。
 如果 tag 没有推到远端，GitHub 构建出的版本就会低于本地 checkout —— 例如本地是
-`0.1.2.dev9`，从 GitHub 装出来却是 `0.1.1.dev15`，因为 `v0.1.1` 这个 tag 只在
+`0.1.3.dev9`，从 GitHub 装出来却是 `0.1.2.dev15`，因为 `v0.1.2` 这个 tag 只在
 本地存在：
 
 ```bash

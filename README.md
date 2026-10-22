@@ -61,7 +61,7 @@ pipx ensurepath                      # open a new terminal afterwards
 pipx install "git+https://github.com/ginkgohat/harbor.git"
 
 # 4. Verify
-harbor --version                     # → harbor 0.1.2.dev9+g...
+harbor --version                     # → harbor 0.1.3.dev9+g...
 ```
 
 ### Install into a virtualenv (alternative)
@@ -278,8 +278,8 @@ make dev
 
 Harbor's version is derived by `setuptools-scm` from the git tags in the clone
 pip builds. If tags were never pushed, GitHub builds a lower version than your
-local checkout — for example local `0.1.2.dev9` but `0.1.1.dev15` when installing
-from GitHub, because tag `v0.1.1` exists only locally:
+local checkout — for example local `0.1.3.dev9` but `0.1.2.dev15` when installing
+from GitHub, because tag `v0.1.2` exists only locally:
 
 ```bash
 git tag -l                       # tags in your local clone
