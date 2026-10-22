@@ -1214,7 +1214,14 @@ setTimeout(_initSyncedStripA11y, 100);
 let serverEpoch = "";
 let lastScanDone = 0;
 let loadSeq = 0;                 // loadRepos request seq (drop out-of-order responses)
-const SCAN_WAIT_MS = 30000;      // budget for one click-triggered rescan
+// Budget for one click-triggered rescan.  The server's rescan is a fetch phase
+// (budgeted at 20s) followed by a status fan-out over every repo; on a cold
+// page cache eight workers can legitimately spend a while per repo, so a 30s
+// budget expires on exactly the slow machines this dashboard targets.  45s
+// covers a realistic cold sweep while still falling back to the "still
+// scanning, this will update automatically" path for a truly stuck scan (the
+// activity toast keeps showing progress meanwhile).
+const SCAN_WAIT_MS = 45000;
 
 function readScanHeaders(res) {
   const num = (name) => {
