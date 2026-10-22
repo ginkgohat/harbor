@@ -237,6 +237,33 @@
   .progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .25s ease; border-radius: 2px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* Activity toast for long-running actions (refresh/rescan).  The stats
+     line it used to rely on is far from the toolbar, and a dimmed icon is
+     easy to miss, so progress is also reported here — near the bottom edge
+     where the eye lands — with an elapsed counter while the work runs. */
+  #activity {
+    position: fixed; left: 50%; bottom: 26px; z-index: 300;
+    transform: translate(-50%, 12px); opacity: 0; pointer-events: none;
+    display: flex; align-items: center; gap: 9px;
+    max-width: min(520px, calc(100vw - 40px));
+    padding: 10px 16px; border-radius: 11px;
+    background: var(--modal-bg); color: var(--text);
+    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--card-border);
+    box-shadow: 0 12px 32px rgba(0,0,0,.18);
+    font-size: 13px; line-height: 1.35;
+    transition: opacity .18s ease, transform .18s ease, background .18s ease;
+  }
+  #activity.show { opacity: 1; transform: translate(-50%, 0); }
+  #activity.busy { background: var(--card); }
+  #activity svg { flex: none; }
+  #activity .a-spin,
+  #activity .a-ok, #activity .a-err, #activity .a-warn { display: none; }
+  #activity.busy .a-spin { display: block; color: var(--accent); animation: spin .9s linear infinite; }
+  #activity.ok .a-ok { display: block; color: var(--success); }
+  #activity.err .a-err { display: block; color: var(--danger); }
+  #activity.warn .a-warn { display: block; color: var(--warning); }
+
   /* ---------- layout ---------- */
   main { padding: 24px 32px 80px; max-width: 1280px; margin: 0 auto; transition: padding-bottom .2s ease; }
 body.term-open main { padding-bottom: 260px; }
@@ -473,6 +500,11 @@ body.term-open main { padding-bottom: 260px; }
     transition: color .15s ease, background .15s ease;
   }
   .settings-btn:hover { color: var(--text); background: var(--seg-bg); }
+  /* Busy state for the refresh icon: a rescan can take tens of seconds, and
+     the icon is the thing the user just clicked, so it has to move. */
+  .settings-btn.busy { color: var(--accent); cursor: progress; }
+  .settings-btn.busy svg { animation: spin .9s linear infinite; }
+  .settings-btn:disabled { cursor: progress; }
   #settingsOverlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,.2);
     backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
@@ -813,6 +845,15 @@ body.term-open main { padding-bottom: 260px; }
   </div>
 </div>
 
+<!-- Activity toast: progress/result for long actions (refresh/rescan) -->
+<div id="activity" role="status" aria-live="polite">
+  <svg class="a-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-opacity=".25"/><path d="M21 12a9 9 0 00-9-9"/></svg>
+  <svg class="a-ok" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+  <svg class="a-err" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+  <svg class="a-warn" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l9 16H3L12 4z"/><line x1="12" y1="10" x2="12" y2="14"/><line x1="12" y1="17" x2="12" y2="17.01"/></svg>
+  <span id="activityText"></span>
+</div>
+
 <script>
 const ICONS = {
   pull: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/></svg>`,
@@ -837,6 +878,8 @@ const STR = {
     tagAhead: (n) => `领先 ${n}`,
     btnPull: "Pull", btnStash: "Stash", btnDiscard: "丢弃", btnMain: "默认分支", btnPreview: "预览", btnVscode: "VSCode",
     refreshTip: "刷新 repo 状态（含远程 fetch）",
+    refreshBusyTip: "正在刷新…",
+    refreshTipUpdated: (time) => `刷新 repo 状态（含远程 fetch）· 上次 ${time}`,
     refreshDone: (n) => `已刷新 · ${n} 个 repo`,
     scanningNow: "正在扫描并同步远程…",
     refreshPending: "仍在扫描，稍后自动更新",
@@ -888,6 +931,8 @@ const STR = {
     tagAhead: (n) => `${n} ahead`,
     btnPull: "Pull", btnStash: "Stash", btnDiscard: "Discard", btnMain: "default", btnPreview: "Preview", btnVscode: "VSCode",
     refreshTip: "Refresh repos (fetch remotes)",
+    refreshBusyTip: "Refreshing…",
+    refreshTipUpdated: (time) => `Refresh repos (fetch remotes) · last ${time}`,
     refreshDone: (n) => `Refreshed · ${n} repos`,
     scanningNow: "Scanning & syncing remotes…",
     refreshPending: "Still scanning — this will update automatically",
@@ -1022,7 +1067,7 @@ function renderStatic() {
   $('button[data-view="attention"]').textContent = t("segAttention");
   $('button[data-view="all"]').textContent = t("segAll");
   $("#pullAllLabel").textContent = t("pullAll");
-  $("#refreshBtn").title = t("refreshTip");
+  updateRefreshTitle();
   $("#syncedLabel").textContent = t("sectionSynced");
   $("#syncedSuffix").textContent = t("syncedSuffix");
   $("#modalConfirm").textContent = t("confirmBtn");
@@ -1221,25 +1266,91 @@ async function waitForScan(scanSeq, epoch, timeoutMs) {
   return null; // timed out — caller falls back to loadRepos()
 }
 
-// Briefly show a one-line message in the stats area, then restore it.
+// Briefly show a one-line message in the stats area, then re-render it from
+// the current repo data (restoring a captured innerHTML would resurrect a
+// stale line if anything changed while the message was up).
 let flashTimer = null;
 function flash(text) {
   const stats = $("#stats");
   if (!stats) return;
-  const original = stats.innerHTML;
   stats.innerHTML = text;
   if (flashTimer) clearTimeout(flashTimer);
   flashTimer = setTimeout(() => {
     flashTimer = null;
-    stats.innerHTML = original;
     render();
   }, 1500);
 }
 
+/* ---------- activity toast (long-running actions) ---------- */
+// A rescan fetches every remote and can take tens of seconds.  The stats line
+// is far from the toolbar and a dimmed icon is easy to miss, so long actions
+// also report progress in a toast near the bottom edge — with a live elapsed
+// counter, which is the clearest signal that the click registered and work is
+// still happening.
+let activityTicker = null;
+let activityHider = null;
+let activityStart = 0;
+let activityLabel = "";
+
+function showActivity(label) {
+  const el = $("#activity");
+  if (!el) return;
+  clearInterval(activityTicker);
+  clearTimeout(activityHider);
+  el.className = "activity show busy";
+  activityLabel = label;
+  activityStart = Date.now();
+  $("#activityText").textContent = label;
+  activityTicker = setInterval(() => {
+    const secs = Math.floor((Date.now() - activityStart) / 1000);
+    if (secs >= 1) $("#activityText").textContent = `${activityLabel} · ${secs}s`;
+  }, 500);
+}
+
+function finishActivity(label, kind) {
+  const el = $("#activity");
+  if (!el) return;
+  clearInterval(activityTicker);
+  activityTicker = null;
+  clearTimeout(activityHider);
+  el.className = `activity show ${kind}`;
+  $("#activityText").textContent = label;
+  activityHider = setTimeout(
+    () => el.classList.remove("show"),
+    kind === "ok" ? 3500 : 6000
+  );
+}
+
+/* ---------- refresh button state ---------- */
+let lastRefreshAt = null;
+
+function refreshTimeLabel() {
+  if (!lastRefreshAt) return "";
+  const locale = lang === "zh" ? "zh-CN" : "en-GB";
+  return lastRefreshAt.toLocaleTimeString(locale, { hour12: false });
+}
+
+function updateRefreshTitle() {
+  const time = refreshTimeLabel();
+  $("#refreshBtn").title = time ? t("refreshTipUpdated", time) : t("refreshTip");
+}
+
+function setRefreshBusy(on) {
+  const btn = $("#refreshBtn");
+  btn.disabled = on;
+  btn.classList.toggle("busy", on);
+  btn.setAttribute("aria-busy", on ? "true" : "false");
+  if (on) btn.title = t("refreshBusyTip");
+  else updateRefreshTitle();
+}
+
 $("#refreshBtn").addEventListener("click", async () => {
   const btn = $("#refreshBtn");
-  btn.disabled = true;
-  btn.style.opacity = "0.5";
+  if (btn.disabled) return;
+  // Feedback starts on the click itself, not on the server reply: a slow POST
+  // or an unreachable backend must not make the button look dead.
+  setRefreshBusy(true);
+  showActivity(t("scanningNow"));
   try {
     const res = await fetch(`/api/rescan`, { method: "POST", signal: AbortSignal.timeout(5000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1255,24 +1366,29 @@ $("#refreshBtn").addEventListener("click", async () => {
       // pretending it succeeded; the 30s poll will pick up the final state.
       await loadRepos();
       flash(t("refreshPending"));
+      finishActivity(t("refreshPending"), "warn");
     } else if (result.restarted) {
       // Harbor restarted mid-wait: the requested scan is gone for good.
       await loadRepos();
       flash(t("refreshFailed"));
+      finishActivity(t("refreshFailed"), "err");
     } else if (result.error) {
       console.error("rescan failed:", result.error);
       await loadRepos();
       flash(t("refreshFailed"));
+      finishActivity(t("refreshFailed"), "err");
     } else {
+      lastRefreshAt = new Date();
       flash(t("refreshDone", result.count));
+      finishActivity(t("refreshDone", result.count), "ok");
     }
   } catch (err) {
     console.error("rescan failed:", err);
     await loadRepos();
     flash(t("refreshFailed"));
+    finishActivity(t("refreshFailed"), "err");
   } finally {
-    btn.disabled = false;
-    btn.style.opacity = "";
+    setRefreshBusy(false);
   }
 });
 

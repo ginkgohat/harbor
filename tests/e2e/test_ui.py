@@ -506,6 +506,56 @@ def test_refresh_button_rescans_repos(page, server_url):
     assert cards >= 2
 
 
+def test_refresh_shows_visible_feedback(page, server_url):
+    """A refresh click must be perceivable: spinning button + activity toast.
+
+    Regression guard for "clicking refresh does nothing": the only cue used to
+    be a muted text swap in the stats line at the far left of the header, so a
+    click on the toolbar icon looked ignored while a long remote fetch ran.
+    """
+    base_url, token = server_url
+    page.goto(f"{base_url}/?token={token}")
+    page.wait_for_selector(".grid", timeout=5000)
+
+    # Observe the states from inside the page: on a local server the busy
+    # window can be shorter than one round trip from the test driver.
+    page.evaluate(
+        """() => {
+            window.__busySeen = false;
+            window.__toastSeen = false;
+            new MutationObserver(() => {
+                const btn = document.querySelector('#refreshBtn');
+                const toast = document.querySelector('#activity');
+                if (btn.getAttribute('aria-busy') === 'true') window.__busySeen = true;
+                if (toast.classList.contains('show') && toast.classList.contains('busy')) {
+                    window.__toastSeen = true;
+                }
+            }).observe(document.body, {
+                attributes: true, subtree: true,
+                attributeFilter: ['aria-busy', 'class'],
+            });
+        }"""
+    )
+
+    page.locator("#refreshBtn").click()
+    page.wait_for_function(
+        "() => window.__busySeen && window.__toastSeen", timeout=5000
+    )
+    # The progress toast is actually on screen, not just present in the DOM.
+    assert page.locator("#activity").is_visible()
+    assert page.locator("#activity").inner_text().strip()
+
+    # The busy state ends with a readable result instead of sticking forever.
+    page.wait_for_function(
+        "() => !document.querySelector('#refreshBtn').disabled", timeout=15000
+    )
+    page.wait_for_function(
+        "() => /刷新|efreshed/.test(document.querySelector('#activity').textContent)",
+        timeout=5000,
+    )
+    assert page.locator("#activity").is_visible()
+
+
 def test_polling_starts_on_page_load(page, server_url):
     """The 30s status poll must start on page load, not only on tab return.
 
