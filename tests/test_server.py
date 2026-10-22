@@ -1,5 +1,6 @@
 """Tests for harbor.server — routing, JSON body parsing, auth, and pull-all worker."""
 
+import errno
 import http.server
 import io
 import json
@@ -924,6 +925,117 @@ def test_cli_roots_not_persisted_to_config(tmp_path, monkeypatch):
     assert not config_path.is_file() or "roots" not in (
         config_mod.load_config(str(config_path)) or {}
     )
+
+
+# ---------------------------------------------------------------------------
+# Startup must never clobber a running instance's PID/token/port state files
+# ---------------------------------------------------------------------------
+
+
+def _redirect_daemon_state(monkeypatch, tmp_path):
+    """Point Harbor's daemon state files at a temp dir (never the real ones)."""
+    from harbor import daemon as daemon_mod
+
+    state_dir = tmp_path / "state"
+    for attr, filename in (
+        ("STATE_DIR", "state"),
+        ("PID_FILE", "harbor.pid"),
+        ("LOG_FILE", "harbor.log"),
+        ("TOKEN_FILE", "harbor.token"),
+        ("PORT_FILE", "harbor.port"),
+        ("SESSION_SECRET_FILE", "harbor.credentials"),
+    ):
+        monkeypatch.setattr(daemon_mod, attr, state_dir / filename)
+    return state_dir
+
+
+def test_run_server_refuses_when_harbor_already_running(monkeypatch, tmp_path):
+    """Starting a second instance gives a friendly error, not a state wipe.
+
+    PID/port/token are process-wide singletons.  A second start used to scan,
+    overwrite them, fail on the busy port and then delete them via atexit —
+    breaking `harbor status`/`harbor stop` for the instance that was serving.
+    """
+    from harbor import daemon as daemon_mod
+    from harbor.__main__ import _build_parser, _run_server
+
+    state_dir = _redirect_daemon_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon_mod, "_read_pid", lambda: 424242)
+    monkeypatch.setattr(daemon_mod, "_is_process_alive", lambda pid: True)
+
+    created = []
+    monkeypatch.setattr(
+        "harbor.__main__._create_server", lambda port: created.append(port)
+    )
+
+    args = _build_parser().parse_args(
+        ["serve", str(tmp_path), "--config", str(tmp_path / "config.toml")]
+    )
+    assert _run_server(args) == 1
+    # It bailed out before scanning/binding/writing state.
+    assert created == []
+    assert not (state_dir / "harbor.pid").exists()
+
+
+def test_failed_start_leaves_running_instance_state_files_untouched(
+    monkeypatch, tmp_path
+):
+    """A busy port must not overwrite (or atexit-delete) the serving instance's files."""
+    from harbor import daemon as daemon_mod
+    from harbor.__main__ import _build_parser, _run_server
+
+    state_dir = _redirect_daemon_state(monkeypatch, tmp_path)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = state_dir / "harbor.pid"
+    token_file = state_dir / "harbor.token"
+    port_file = state_dir / "harbor.port"
+    pid_file.write_text("12345")
+    token_file.write_text("running-token\n")
+    port_file.write_text("8765")
+
+    # No live pid in the state dir, so the double-start guard lets us through.
+    monkeypatch.setattr(daemon_mod, "_read_pid", lambda: None)
+
+    # Force the bind to fail deterministically instead of occupying a real
+    # socket: on Windows the second bind reports WSAEACCES (10013) rather than
+    # WSAEADDRINUSE, and with SO_REUSEADDR it can even succeed — either way the
+    # test would be flaky or hang.  _create_server's errno mapping itself is
+    # covered by the port-in-use unit tests.
+    def _busy_port(*args, **kwargs):
+        raise OSError(errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr("harbor.__main__.http.server.ThreadingHTTPServer", _busy_port)
+
+    registered = []
+
+    class _NoAtexit:
+        @staticmethod
+        def register(fn):
+            registered.append(fn)
+
+    monkeypatch.setattr("harbor.__main__.atexit", _NoAtexit)
+
+    args = _build_parser().parse_args(
+        [
+            "serve",
+            str(tmp_path),
+            "--config",
+            str(tmp_path / "config.toml"),
+            "--port",
+            "8765",
+            "--no-browser",
+        ]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        _run_server(args)
+    assert exc_info.value.code == 1
+
+    # The failed startup neither registered the atexit cleanup...
+    assert registered == []
+    # ...nor touched the serving instance's state files.
+    assert pid_file.read_text() == "12345"
+    assert token_file.read_text() == "running-token\n"
+    assert port_file.read_text() == "8765"
 
 
 # ---------------------------------------------------------------------------
