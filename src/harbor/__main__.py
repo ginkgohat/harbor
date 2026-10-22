@@ -327,7 +327,8 @@ def _run_server(args: argparse.Namespace) -> int:
             "Harbor is already running (PID %d).\n"
             "  → Open it with:        harbor status   (prints the URL)\n"
             "  → Restart it with:     harbor stop && harbor start\n"
-            "  → Or use another port: harbor --port <number>",
+            "  Only one instance per user is supported: the PID/token/port\n"
+            "  files are shared, so a second instance would overwrite this state.",
             existing_pid,
         )
         return 1

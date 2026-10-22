@@ -949,7 +949,7 @@ def _redirect_daemon_state(monkeypatch, tmp_path):
     return state_dir
 
 
-def test_run_server_refuses_when_harbor_already_running(monkeypatch, tmp_path):
+def test_run_server_refuses_when_harbor_already_running(monkeypatch, tmp_path, caplog):
     """Starting a second instance gives a friendly error, not a state wipe.
 
     PID/port/token are process-wide singletons.  A second start used to scan,
@@ -975,6 +975,15 @@ def test_run_server_refuses_when_harbor_already_running(monkeypatch, tmp_path):
     # It bailed out before scanning/binding/writing state.
     assert created == []
     assert not (state_dir / "harbor.pid").exists()
+
+    # The advice has to be actionable: a second instance would share (and
+    # overwrite) the same PID/token/port files, so suggesting another port
+    # would only produce the same error again.
+    assert "already running (PID 424242)" in caplog.text
+    assert "harbor status" in caplog.text
+    assert "harbor stop && harbor start" in caplog.text
+    assert "--port" not in caplog.text
+    assert "Only one instance per user" in caplog.text
 
 
 def test_failed_start_leaves_running_instance_state_files_untouched(
