@@ -72,7 +72,11 @@ PYTHONPATH=src python3 -m pytest tests/test_server.py::test_origin_check -v
 - Type hints: encouraged but not required. `mypy` is permissive (informational only).
 - Docstrings: all public functions/classes should have them. Use Google style or reST — be consistent with the function you're near.
 - Use `pathlib.Path` for paths, not `os.path`.
-- Subprocess calls: always via `git.py` wrappers. Set `GIT_TERMINAL_PROMPT=0`.
+- Subprocess calls: always via `git.py` wrappers. Set `GIT_TERMINAL_PROMPT=0` so
+  no command can hang on a credential prompt, and `GIT_OPTIONAL_LOCKS=0` so
+  read-only polling (`status`, `diff`, ...) never takes `.git/index.lock` —
+  a poller killed mid-command would otherwise leave a lock file that blocks
+  every later `git pull` until it is deleted by hand.
 - Error handling: raise specific exceptions; don't swallow with bare `except`.
 
 ### Frontend (HTML/CSS/JS)
