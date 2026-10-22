@@ -165,6 +165,29 @@ class TestEnvironmentDetection:
         assert selfmanage._is_pipx_managed() is False
 
 
+class TestFindPipx:
+    def test_prefers_path_lookup(self, monkeypatch):
+        monkeypatch.setattr(
+            selfmanage.shutil, "which", lambda name: "/opt/homebrew/bin/pipx"
+        )
+        assert selfmanage._find_pipx() == "/opt/homebrew/bin/pipx"
+
+    def test_falls_back_to_local_bin(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(selfmanage.shutil, "which", lambda name: None)
+        monkeypatch.setattr(selfmanage.Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(selfmanage.os, "name", "posix")
+        fake = tmp_path / ".local" / "bin" / "pipx"
+        fake.parent.mkdir(parents=True)
+        fake.write_text("")
+        assert selfmanage._find_pipx() == str(fake)
+
+    def test_returns_none_when_absent(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(selfmanage.shutil, "which", lambda name: None)
+        monkeypatch.setattr(selfmanage.Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(selfmanage.os, "name", "posix")
+        assert selfmanage._find_pipx() is None
+
+
 class TestCmdSelfUpdate:
     def test_editable_mode_rejects_update(self, capsys):
         with patch.object(selfmanage, "_detect_install_kind", return_value="editable"):
@@ -214,15 +237,64 @@ class TestCmdSelfUpdate:
         assert "Successfully installed harbor-0.1.2" in captured.out
         assert "updated" in captured.out
 
-    def test_pipx_managed_update_recommends_pipx(self, capsys, monkeypatch):
+    def test_pipx_managed_update_runs_pipx_upgrade(self, capsys, monkeypatch):
+        """pipx installs are upgraded by delegating to pipx, not by printing a hint."""
         monkeypatch.setattr(selfmanage, "_detect_install_kind", lambda: "git+https")
         monkeypatch.setattr(selfmanage, "_is_pipx_managed", lambda: True)
+        monkeypatch.setattr(selfmanage, "_find_pipx", lambda: "/usr/local/bin/pipx")
+        monkeypatch.setattr(selfmanage.os, "name", "posix")
         monkeypatch.setattr(selfmanage, "_run_pip", _unexpected_pip)
-        rc = selfmanage.cmd_self_update()
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("subprocess.run", return_value=completed) as mock_run:
+            rc = selfmanage.cmd_self_update()
+
+        assert rc == 0
+        # stdio is inherited so pipx can stream progress / ask for credentials
+        assert mock_run.call_args[0][0] == ["/usr/local/bin/pipx", "upgrade", "harbor"]
+        captured = capsys.readouterr()
+        assert "via pipx" in captured.out
+        assert "updated" in captured.out
+        assert "harbor stop && harbor start" in captured.out
+
+    def test_pipx_upgrade_failure_propagates_exit_code(self, capsys, monkeypatch):
+        monkeypatch.setattr(selfmanage, "_detect_install_kind", lambda: "git+https")
+        monkeypatch.setattr(selfmanage, "_is_pipx_managed", lambda: True)
+        monkeypatch.setattr(selfmanage, "_find_pipx", lambda: "/usr/local/bin/pipx")
+        monkeypatch.setattr(selfmanage.os, "name", "posix")
+        completed = subprocess.CompletedProcess([], 2, "", "")
+        with patch("subprocess.run", return_value=completed):
+            rc = selfmanage.cmd_self_update()
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "pipx upgrade failed" in err
+        assert selfmanage.PIPX_REINSTALL_COMMAND in err
+
+    def test_pipx_update_on_windows_hands_off_to_user(self, capsys, monkeypatch):
+        """Windows cannot rename a venv that is executing, so pipx is not run."""
+        monkeypatch.setattr(selfmanage, "_detect_install_kind", lambda: "git+https")
+        monkeypatch.setattr(selfmanage, "_is_pipx_managed", lambda: True)
+        monkeypatch.setattr(selfmanage, "_find_pipx", lambda: r"C:\pipx\pipx.exe")
+        monkeypatch.setattr(selfmanage.os, "name", "nt")
+        with patch("subprocess.run", side_effect=AssertionError("must not run pipx")):
+            rc = selfmanage.cmd_self_update()
+
         assert rc == 1
         err = capsys.readouterr().err
         assert selfmanage.PIPX_UPGRADE_COMMAND in err
-        assert "pipx" in err
+        assert "new terminal" in err
+
+    def test_pipx_missing_falls_back_to_help(self, capsys, monkeypatch):
+        monkeypatch.setattr(selfmanage, "_detect_install_kind", lambda: "git+https")
+        monkeypatch.setattr(selfmanage, "_is_pipx_managed", lambda: True)
+        monkeypatch.setattr(selfmanage, "_find_pipx", lambda: None)
+        monkeypatch.setattr(selfmanage.os, "name", "posix")
+        monkeypatch.setattr(selfmanage, "_run_pip", _unexpected_pip)
+        rc = selfmanage.cmd_self_update()
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert selfmanage.PIPX_UPGRADE_COMMAND in err
 
     def test_pep668_update_prints_pipx_and_venv_guidance(self, capsys, monkeypatch):
         monkeypatch.setattr(selfmanage, "_detect_install_kind", lambda: "git+https")
