@@ -4,8 +4,9 @@ Harbor is installed from GitHub (the PyPI name ``harbor`` is taken by another
 project), so we upgrade / remove the package by invoking pip against the
 current Python interpreter -- unless that interpreter is managed by pipx or by
 the OS (PEP 668).  In those environments running pip either fails outright or
-would break the installation, so we print the command the user should run
-instead.
+would break the installation, so we delegate: a pipx install is upgraded with
+``pipx upgrade harbor`` (run for the user where the OS allows it), and PEP 668
+installs get the command the user should run instead.
 
 The detection helpers mirror pip's own logic, are stdlib-only and side-effect
 free, so they are cheap to call from the CLI and easy to unit test.
@@ -14,11 +15,13 @@ free, so they are cheap to call from the CLI and easy to unit test.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
 from collections.abc import Sequence
 from itertools import pairwise
+from pathlib import Path
 from typing import Literal
 
 GITHUB_INSTALL_URL = "git+https://github.com/ginkgohat/harbor.git"
@@ -135,6 +138,81 @@ def _looks_like_pipx_venv(prefix: str) -> bool:
 def _is_pipx_managed() -> bool:
     """True when the currently running Harbor lives in a pipx-managed venv."""
     return _looks_like_pipx_venv(sys.prefix)
+
+
+def _find_pipx() -> str | None:
+    """Return the pipx executable, or ``None`` when it cannot be located.
+
+    ``pipx`` normally lands in ``~/.local/bin``, which launchers, desktop
+    shortcuts and some shells leave off ``PATH``; fall back to pipx's default
+    install location instead of failing just because ``PATH`` is minimal.
+    """
+    found = shutil.which("pipx")
+    if found:
+        return found
+    exe = "pipx.exe" if os.name == "nt" else "pipx"
+    candidate = Path.home() / ".local" / "bin" / exe
+    return str(candidate) if candidate.is_file() else None
+
+
+def _run_pipx_upgrade() -> int:
+    """Upgrade a pipx-managed Harbor by running ``pipx upgrade harbor``.
+
+    pipx upgrades a git install by *replacing* the virtualenv: it renames the
+    old venv into the trash and builds a fresh one at the same path.  On POSIX
+    that works while Harbor itself is executing from that venv (running
+    processes keep their inodes); on Windows a directory containing a running
+    executable cannot be renamed, so there the command is handed to the user
+    instead of failing half-way.
+    """
+    pipx = _find_pipx()
+    if pipx is None:
+        _print_pipx_update_help()
+        return 1
+
+    if os.name == "nt":
+        print(
+            "Harbor is managed by pipx.  pipx replaces Harbor's virtualenv when\n"
+            "upgrading a git install, which Windows cannot do while Harbor is\n"
+            "running from it.  Run this in a new terminal:\n"
+            f"  → {PIPX_UPGRADE_COMMAND}\n"
+            f"  → or force a reinstall:  {PIPX_REINSTALL_COMMAND}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("Upgrading Harbor via pipx...")
+    print(f"  $ {pipx} upgrade {PACKAGE_NAME}")
+    print()
+    try:
+        # Inherit stdio: pipx clones and builds for a while, and it may need to
+        # answer a git credential prompt, which only works with a real TTY.
+        proc = subprocess.run([pipx, "upgrade", PACKAGE_NAME], check=False)
+    except FileNotFoundError:
+        print("error: pipx is not available on PATH.", file=sys.stderr)
+        _print_pipx_update_help()
+        return 1
+    except OSError as exc:
+        print(f"error: could not run pipx: {exc}", file=sys.stderr)
+        _print_pipx_update_help()
+        return 1
+
+    if proc.returncode == 0:
+        print()
+        print("✓ Harbor has been updated.")
+        print(
+            "  If Harbor is currently running, restart it for changes to take effect:\n"
+            "       harbor stop && harbor start"
+        )
+        return 0
+
+    print(file=sys.stderr)
+    print(f"✗ pipx upgrade failed (exit {proc.returncode}).", file=sys.stderr)
+    print(
+        f"  → Try a forced reinstall from GitHub:  {PIPX_REINSTALL_COMMAND}",
+        file=sys.stderr,
+    )
+    return proc.returncode or 1
 
 
 def _detect_install_kind() -> str:
@@ -298,8 +376,7 @@ def cmd_self_update() -> int:
 
     # pipx: never run pip inside its venv — upgrade the app through pipx.
     if _is_pipx_managed():
-        _print_pipx_update_help()
-        return 1
+        return _run_pipx_upgrade()
 
     # PEP 668: pip would fail here with "externally-managed-environment".
     if _is_externally_managed():

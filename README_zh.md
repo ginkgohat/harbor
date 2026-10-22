@@ -87,12 +87,16 @@ pipx uninstall harbor
 rm -rf ~/.venvs/harbor
 ```
 
-Harbor 也内置了检查安装方式并给出正确命令的辅助子命令：
+Harbor 也内置了检查安装方式并执行（或提示）正确命令的辅助子命令：
 
 ```bash
-harbor update       # 升级，或提示对应的 pipx / venv / PEP 668 做法
+harbor update       # 升级 —— pipx 安装会自动调用 pipx upgrade harbor
 harbor uninstall    # 卸载，或提示对应的 pipx / PEP 668 做法
 ```
+
+对 pipx 安装，`harbor update` 在 macOS/Linux 上会直接帮你执行
+`pipx upgrade harbor`；Windows 上 pipx 需要替换正在运行的 venv，这一步无法在
+Harbor 进程内完成，因此会提示你在新终端里执行。
 
 > **直接用 `pip` 的限制** —— `pip install ...` 和
 > `pip install --upgrade ...` 只适用于 virtualenv 内部，或者在不受 PEP 668

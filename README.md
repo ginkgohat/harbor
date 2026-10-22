@@ -88,13 +88,18 @@ pipx uninstall harbor
 rm -rf ~/.venvs/harbor
 ```
 
-Harbor also has built-in helpers that check how it was installed and print the
-command that actually works for your setup:
+Harbor also has built-in helpers that check how it was installed and run (or
+print) the command that actually works for your setup:
 
 ```bash
-harbor update       # upgrade, or tell you the right pipx / venv / PEP 668 command
+harbor update       # upgrade — pipx installs are upgraded through pipx automatically
 harbor uninstall    # remove, or tell you the right pipx / PEP 668 command
 ```
+
+For a pipx install, `harbor update` runs `pipx upgrade harbor` for you on
+macOS/Linux. On Windows pipx has to replace Harbor's virtualenv, which is not
+possible while Harbor itself is running from it, so the command is printed for
+you to run in a new terminal instead.
 
 > **Plain `pip` caveat** — `pip install ...` and `pip install --upgrade ...` only
 > work inside a virtualenv or with `--user` on a Python that is not PEP 668
