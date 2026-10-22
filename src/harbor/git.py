@@ -6,15 +6,18 @@ URLs, or request handlers.  All functions return plain Python objects
 translating them into HTTP responses.
 """
 
+import contextlib
 import logging
 import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,13 @@ class ActionOutcome:
 # iCloud placeholder file, credential prompt, index.lock contention) from
 # blocking an API request forever.
 GIT_TIMEOUT = 10
+# `git status` gets its own, longer leash.  It is the one command harbor fans
+# out over *every* repo on a timer, and on a cold page cache (machine just
+# woke up) a 19k-40k file tree can take well over 10s while eight workers
+# stat different repos at once.  Timing those out early buys nothing — a
+# failed status only degrades to "dirty + detached" on the dashboard — so
+# give real work room to finish instead of killing it.
+STATUS_TIMEOUT = 30
 # Network operations (git pull / fetch) may legitimately take longer on slow
 # links.  Fetches are bounded tighter than pulls: a rescan fans out over every
 # repo, so one hanging remote must not hold the refresh button hostage.
@@ -82,6 +92,25 @@ FETCH_WORKERS = 8
 # 30s budget.  Repos that miss the budget fall back to local refs.
 FETCH_BUDGET = 20.0
 
+# How long a timed-out git command gets to exit after SIGTERM before it is
+# SIGKILLed.  git's signal handlers close and delete its lock files, so the
+# graceful step is what keeps an interrupted command from leaving debris.
+TERM_GRACE_SECONDS = 2.0
+# Run every command in its own session/process group so a timeout can signal
+# the whole tree.  `git pull` spawns `git fetch`, which in turn spawns
+# `git-remote-https`/ssh helpers; killing only the direct child orphans them
+# and they keep holding the repo (and its locks).
+_START_NEW_SESSION = os.name != "nt"
+
+# A zero-byte `.git/index.lock` older than this is debris from a git process
+# that was killed while writing the index, not a live operation: harbor bounds
+# every mutating command with `PULL_TIMEOUT` (120s) and interactive git never
+# holds the index lock for minutes.  Leaving such a file in place makes every
+# later `git pull` fail with
+#   "Unable to create '.../index.lock': File exists"
+# long after the process that created it is gone.
+STALE_INDEX_LOCK_AGE = 300.0
+
 
 def _git_env() -> dict[str, str]:
     """Environment for git subprocesses with interactive prompts disabled.
@@ -91,10 +120,19 @@ def _git_env() -> dict[str, str]:
     strictly better.  ``GIT_TERMINAL_PROMPT=0`` is git's official switch;
     ``GCM_INTERACTIVE=never`` covers Git Credential Manager (Windows) on a
     best-effort basis.
+
+    ``GIT_OPTIONAL_LOCKS=0`` is what keeps status polling from taking the
+    index lock at all.  Read-only commands (``status``, ``diff``, ...) only
+    grab ``.git/index.lock`` to opportunistically refresh the stat cache; with
+    the switch off they never create it, so a poller that is killed mid-command
+    (OS sleep, daemon restart, timeout) cannot leave a lock file behind.
+    Required locks — the ones ``pull``/``checkout``/``stash`` need — are
+    unaffected.
     """
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     return env
 
 
@@ -106,16 +144,61 @@ def run_git(
     Returns ``rc=None`` when the command times out — callers treat any
     non-zero rc as failure, so a timeout degrades to a safe conservative
     result instead of hanging the request.
+
+    A timed-out command is stopped politely first (SIGTERM to its whole
+    process group) and only then killed.  This matters beyond tidiness: git
+    removes its ``.git/index.lock`` on SIGTERM, but not on the SIGKILL that
+    ``subprocess.run(timeout=...)`` uses, so a blunt kill can leave a lock
+    file that blocks the repository until somebody deletes it by hand.
     """
     cmd = ["git", "-C", path, *args]
+    # A missing git binary raises OSError out of Popen, exactly as
+    # subprocess.run did: that is an environment problem, not a repo state, and
+    # must not be mistaken for a clean/empty result.
+    p = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_git_env(),
+        start_new_session=_START_NEW_SESSION,
+    )
     try:
-        p = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, env=_git_env()
-        )
+        out, err = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         logger.warning("git command timed out after %ss: %s", timeout, " ".join(cmd))
-        return None, "", f"timed out after {timeout}s"
-    return p.returncode, p.stdout, p.stderr
+        _stop_process(p, force=False)
+        try:
+            out, err = p.communicate(timeout=TERM_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            _stop_process(p, force=True)
+            try:
+                out, err = p.communicate(timeout=TERM_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:  # pragma: no cover - stuck in D state
+                out, err = "", ""
+        return None, out, f"timed out after {timeout}s"
+    return p.returncode, out, err
+
+
+# Quoted so the generic argument never has to be evaluated at runtime —
+# only type checkers need it.
+def _stop_process(p: "subprocess.Popen[str]", *, force: bool) -> None:
+    """Signal *p* and, on POSIX, every process it spawned.
+
+    Uses the process group created by ``start_new_session`` so grandchildren
+    (``git fetch`` -> ``git-remote-https``/ssh) die with their parent instead
+    of lingering and keeping the repository busy.
+    """
+    if os.name == "nt":  # no process groups here; stop the direct child
+        if force:
+            p.kill()
+        else:
+            p.terminate()
+        return
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    # Already gone is fine — the goal was for it to stop.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(p.pid, sig)
 
 
 def parse_porcelain_v2(text: str) -> dict[str, Any]:
@@ -179,7 +262,9 @@ def repo_status(repo: Repo | dict[str, Any]) -> dict[str, Any]:
         repo.default_branch if isinstance(repo, Repo) else repo.get("default_branch")
     )
 
-    rc, out, _ = run_git(path, "status", "--porcelain=v2", "--branch")
+    rc, out, _ = run_git(
+        path, "status", "--porcelain=v2", "--branch", timeout=STATUS_TIMEOUT
+    )
     if rc == 0:
         parsed = parse_porcelain_v2(out)
     else:
@@ -353,10 +438,73 @@ def safe_pull_check(path: str) -> tuple[bool, str]:
     return True, ""
 
 
+def index_lock_path(path: str) -> str | None:
+    """Return the ``index.lock`` path of the repo at *path*, if it has one.
+
+    Asks git for the path instead of assuming ``<path>/.git/index.lock``:
+    linked worktrees and submodules keep their index somewhere else, and a
+    worktree's ``.git`` is a file rather than a directory.
+    """
+    rc, out, _ = run_git(path, "rev-parse", "--git-path", "index.lock")
+    if rc != 0:
+        return None
+    lock = out.strip()
+    if not lock:
+        return None
+    return lock if os.path.isabs(lock) else str(Path(path) / lock)
+
+
+def clear_stale_index_lock(path: str) -> str | None:
+    """Remove a stale ``index.lock`` left behind by a killed git process.
+
+    git creates ``index.lock`` empty and writes the new index into it before
+    renaming it into place, so a *live* command's lock is either fresh or
+    non-empty.  Only zero-byte locks older than
+    :data:`STALE_INDEX_LOCK_AGE` are removed; anything else is left for the
+    user to inspect.  Returns the removed path, or ``None`` if nothing was
+    removed.
+
+    This is the self-healing half of the index-lock story: read-only commands
+    run with ``GIT_OPTIONAL_LOCKS=0`` and never create the file, timed-out
+    commands are now stopped with SIGTERM (git cleans up after itself), and
+    this sweeps up debris left by a process that was SIGKILLed anyway — e.g.
+    the machine sleeping/being force-quit mid-command.  Without it, one dead
+    lock file makes every later pull fail with "Unable to create
+    '.../index.lock': File exists" until somebody deletes it by hand.
+    """
+    lock = index_lock_path(path)
+    if lock is None:
+        return None
+    try:
+        st = os.stat(lock)
+    except OSError:
+        return None
+    if st.st_size != 0:
+        return None
+    age = time.time() - st.st_mtime
+    if age < STALE_INDEX_LOCK_AGE:
+        return None
+    try:
+        os.unlink(lock)
+    except OSError as exc:
+        logger.warning("could not remove stale index.lock %s: %s", lock, exc)
+        return None
+    logger.warning(
+        "removed stale index.lock (%.0fs old): %s — a killed git process left "
+        "it behind and it was blocking every write to this repo",
+        age,
+        lock,
+    )
+    return lock
+
+
 def pull_one(repo: Repo | dict[str, Any], q: queue.Queue[dict[str, Any]]) -> None:
     """Pull a single repo, pushing progress events to *q*."""
     name = _repo_name(repo)
     path = _repo_path(repo)
+    # A pull is exactly the operation a leftover index.lock blocks, and the
+    # user clicking "pull" is the natural moment to clear debris.
+    cleared = clear_stale_index_lock(path)
     q.put({"repo": name, "status": "running"})
 
     can_pull, reason = safe_pull_check(path)
@@ -365,16 +513,17 @@ def pull_one(repo: Repo | dict[str, Any], q: queue.Queue[dict[str, Any]]) -> Non
         return
 
     rc, out, err = run_git(path, "pull", "--ff-only", timeout=PULL_TIMEOUT)
+    note = "cleared stale index.lock; " if cleared else ""
     if rc == 0:
         q.put(
             {
                 "repo": name,
                 "status": "success",
-                "message": (out.strip() or "already up to date"),
+                "message": note + (out.strip() or "already up to date"),
             }
         )
     else:
-        q.put({"repo": name, "status": "failed", "message": (out + err).strip()})
+        q.put({"repo": name, "status": "failed", "message": note + (out + err).strip()})
 
 
 # Diff payloads go straight into memory and the DOM; cap them so a
@@ -424,6 +573,12 @@ def do_action(
     if not repo:
         return ActionOutcome(ok=False, output="unknown repo", status="not_found")
     repo_path = _repo_path(repo)
+    cleared: str | None = None
+    if action in ("pull", "stash", "discard", "checkout-main"):
+        # Every one of these writes the index, so the same leftover
+        # index.lock fails them all with the same "another git process seems
+        # to be running" message.  Clear the debris before trying.
+        cleared = clear_stale_index_lock(repo_path)
 
     if action == "pull":
         can_pull, reason = safe_pull_check(repo_path)
@@ -466,7 +621,14 @@ def do_action(
             ok=False, output=f"unknown action: {action}", status="bad_request"
         )
 
-    return ActionOutcome(ok=(rc == 0), output=(out + err).strip(), status="ok")
+    output = (out + err).strip()
+    if cleared:
+        output = (
+            f"cleared stale index.lock; {output}"
+            if output
+            else "cleared stale index.lock"
+        )
+    return ActionOutcome(ok=(rc == 0), output=output, status="ok")
 
 
 def _default_branch(path: str) -> str | None:

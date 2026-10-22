@@ -1,6 +1,7 @@
 """Basic tests for Harbor."""
 
 import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -566,22 +567,192 @@ def test_run_git():
 
 def test_run_git_disables_interactive_prompts():
     """T-013: every git subprocess runs with GIT_TERMINAL_PROMPT=0."""
-    import subprocess
-    from unittest.mock import patch
+    import harbor.git as git_mod
 
     with tempfile.TemporaryDirectory() as d:
         init_repo(Path(d))
-        with patch("subprocess.run") as mock_run:
-            mock_result = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="main", stderr=""
-            )
-            mock_run.return_value = mock_result
-            run_git(d, "rev-parse", "--abbrev-ref", "HEAD")
-            # Verify env was passed with the prompt-disabling vars
-            call_kwargs = mock_run.call_args[1]
-            env = call_kwargs.get("env", {})
-            assert env.get("GIT_TERMINAL_PROMPT") == "0"
-            assert env.get("GCM_INTERACTIVE") == "never"
+        captured = {}
+
+        class FakeProc:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return "main", ""
+
+        def fake_popen(cmd, **kwargs):
+            captured.update(kwargs)
+            captured["cmd"] = cmd
+            return FakeProc()
+
+        with patch.object(git_mod.subprocess, "Popen", side_effect=fake_popen):
+            rc, _out, _ = run_git(d, "rev-parse", "--abbrev-ref", "HEAD")
+
+    assert rc == 0
+    env = captured.get("env", {})
+    assert env.get("GIT_TERMINAL_PROMPT") == "0"
+    assert env.get("GCM_INTERACTIVE") == "never"
+    # Optional locks off is what keeps status polling from ever creating
+    # .git/index.lock (see test below).
+    assert env.get("GIT_OPTIONAL_LOCKS") == "0"
+
+
+def test_read_only_polling_never_creates_index_lock(tmp_path):
+    """`git status` must not take the index lock, even when it has work to do.
+
+    A poller that is killed while holding that lock leaves a 0-byte
+    .git/index.lock behind, and every later `git pull` then fails with
+    "Unable to create '.../index.lock': File exists" until it is removed by
+    hand.  GIT_OPTIONAL_LOCKS=0 is git's supported way to opt out: the index
+    is still read, it is just never rewritten.
+    """
+    from harbor.git import _git_env
+
+    repo = tmp_path / "r"
+    init_repo(repo)
+    # Make the stat cache stale so a default `git status` would rewrite the
+    # index (and therefore take the lock).
+    (repo / "README.md").write_text("# changed content")
+    assert _git_env()["GIT_OPTIONAL_LOCKS"] == "0"
+
+    before = (repo / ".git" / "index").stat().st_mtime_ns
+    repo_status({"name": "r", "path": str(repo)})
+    assert not (repo / ".git" / "index.lock").exists()
+    assert (repo / ".git" / "index").stat().st_mtime_ns == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups only")
+def test_run_git_timeout_stops_process_group_gracefully(monkeypatch):
+    """A timed-out git command is SIGTERMed first, SIGKILLed only as a last resort.
+
+    The graceful step is what lets git delete its own lock files;
+    subprocess.run(timeout=...) would jump straight to SIGKILL and leave them.
+    """
+    import harbor.git as git_mod
+
+    signals = []
+
+    class HangingProc:
+        pid = 4242
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=timeout)
+
+    monkeypatch.setattr(git_mod.subprocess, "Popen", lambda *a, **kw: HangingProc())
+    monkeypatch.setattr(git_mod.os, "killpg", lambda pid, sig: signals.append(sig))
+
+    rc, _, err = run_git("/nonexistent", "status", timeout=0.01)
+
+    assert rc is None
+    assert "timed out after 0.01s" in err
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+# ---------------------------------------------------------------------------
+# Stale index.lock self-healing
+# ---------------------------------------------------------------------------
+
+
+def _backdate(path, seconds):
+    """Age *path* so the stale-lock reaper considers it debris."""
+    old = time.time() - seconds
+    os.utime(path, (old, old))
+
+
+def test_clear_stale_index_lock_removes_old_empty_lock(tmp_path):
+    from harbor.git import clear_stale_index_lock
+
+    repo = tmp_path / "r"
+    init_repo(repo)
+    lock = repo / ".git" / "index.lock"
+    lock.write_text("")
+    _backdate(lock, 3600)
+
+    assert clear_stale_index_lock(str(repo)) == str(lock)
+    assert not lock.exists()
+
+
+def test_clear_stale_index_lock_keeps_fresh_or_nonempty_lock(tmp_path):
+    from harbor.git import clear_stale_index_lock
+
+    repo = tmp_path / "r"
+    init_repo(repo)
+    lock = repo / ".git" / "index.lock"
+
+    # Fresh: could belong to a git command running right now.
+    lock.write_text("")
+    assert clear_stale_index_lock(str(repo)) is None
+    assert lock.exists()
+
+    # Non-empty: git already wrote the new index into it, so it is not debris.
+    lock.write_text("index payload")
+    _backdate(lock, 3600)
+    assert clear_stale_index_lock(str(repo)) is None
+    assert lock.exists()
+
+    # No lock at all is a no-op.
+    lock.unlink()
+    assert clear_stale_index_lock(str(repo)) is None
+
+
+def test_clear_stale_index_lock_ignores_missing_repo(tmp_path):
+    from harbor.git import clear_stale_index_lock
+
+    assert clear_stale_index_lock(str(tmp_path / "not-a-repo")) is None
+
+
+def test_pull_all_reaps_stale_index_lock(tmp_path):
+    """A leftover index.lock must not make the batch pull fail forever."""
+    import queue as queue_mod
+
+    from harbor.git import pull_one
+
+    _origin, seed, work = _make_origin_and_clones(tmp_path)
+    (seed / "b.txt").write_text("two\n")
+    subprocess.run(
+        ["git", "-C", str(seed), "add", "."], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(seed), "commit", "-m", "c2"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(seed), "push", "origin", "main"],
+        check=True,
+        capture_output=True,
+    )
+
+    lock = work / ".git" / "index.lock"
+    lock.write_text("")
+    _backdate(lock, 3600)
+
+    q = queue_mod.Queue()
+    pull_one({"name": "work", "path": str(work)}, q)
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+
+    outcome = [e for e in events if e.get("status") in ("success", "failed")]
+    assert len(outcome) == 1
+    assert outcome[0]["status"] == "success", outcome[0]
+    assert "cleared stale index.lock" in outcome[0]["message"]
+    assert not lock.exists()
+    assert (work / "b.txt").exists()  # the fast-forward actually happened
+
+
+def test_do_action_pull_reaps_stale_index_lock(tmp_path):
+    """The single-card pull action heals the same debris."""
+    from harbor.git import do_action
+
+    _origin, _seed, work = _make_origin_and_clones(tmp_path)
+    lock = work / ".git" / "index.lock"
+    lock.write_text("")
+    _backdate(lock, 3600)
+
+    path = str(work)
+    outcome = do_action(path, "pull", {path: {"name": "work", "path": path}})
+
+    assert outcome.ok is True, outcome.output
+    assert "cleared stale index.lock" in outcome.output
+    assert not lock.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -823,13 +994,61 @@ def test_create_server_port_in_use_exits_with_friendly_message(caplog):
 
     assert "Port 8765 is already in use" in caplog.text
     assert "harbor --port <number>" in caplog.text
-    assert "lsof -i :8765" in caplog.text
+    # The "who owns this port?" hint has to match the platform's tooling.
+    if os.name == "nt":
+        assert "netstat -ano | findstr :8765" in caplog.text
+    else:
+        assert "lsof -i :8765" in caplog.text
 
 
 def test_create_server_port_in_use_by_message_text(caplog):
     """Some platforms may set errno differently but include the message text."""
     with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
         mock_cls.side_effect = OSError(99, "Address already in use")
+        with pytest.raises(SystemExit) as exc_info:
+            _create_server(8765)
+        assert exc_info.value.code == 1
+
+    assert "Port 8765 is already in use" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("errno_value", "message"),
+    [
+        # Windows: WSAEADDRINUSE — "Only one usage of each socket address ..."
+        (10048, "Only one usage of each socket address is normally permitted"),
+        # Windows: WSAEACCES — port in an excluded range / held exclusively.
+        # Seen on GitHub's Windows runners when a second bind hits a busy port.
+        (
+            10013,
+            "An attempt was made to access a socket in a way forbidden by its "
+            "access permissions",
+        ),
+    ],
+)
+def test_create_server_windows_port_errors_exit_friendly(caplog, errno_value, message):
+    """Windows errno values for "port unavailable" must not leak a traceback.
+
+    ``_create_server`` used to special-case errno 48 (macOS) plus the POSIX
+    message text only, so a busy port on Windows raised PermissionError out of
+    ``harbor serve`` instead of the friendly "pick another port" error.
+    """
+    with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
+        mock_cls.side_effect = OSError(errno_value, message)
+        with pytest.raises(SystemExit) as exc_info:
+            _create_server(8765)
+        assert exc_info.value.code == 1
+
+    assert "Port 8765 is already in use" in caplog.text
+
+
+def test_create_server_winerror_is_recognised(caplog):
+    """On Windows the socket code can land in ``winerror``, not ``errno``."""
+    err = OSError(22, "Invalid argument")
+    err.winerror = 10048  # type: ignore[attr-defined]
+
+    with patch("harbor.__main__.http.server.ThreadingHTTPServer") as mock_cls:
+        mock_cls.side_effect = err
         with pytest.raises(SystemExit) as exc_info:
             _create_server(8765)
         assert exc_info.value.code == 1

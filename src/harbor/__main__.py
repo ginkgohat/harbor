@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import errno
 import http.server
 import logging
 import os
@@ -44,6 +45,38 @@ TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 END_OF_OPTIONS = "--"
 
 
+#: errno values that mean "this port cannot be bound because it is taken".
+#: POSIX reports ``EADDRINUSE`` (48 on macOS/BSD, 98 on Linux).  Windows
+#: reports ``WSAEADDRINUSE`` as errno 10048, and — when the port sits in an
+#: excluded/reserved range or is held with exclusive access — ``WSAEACCES`` as
+#: errno 10013.  From the user's point of view all of them mean "the port is
+#: not available, pick another one", so they share one friendly error instead
+#: of leaking a traceback.
+_PORT_TAKEN_ERRNOS = {errno.EADDRINUSE, 10048, 10013}
+_PORT_TAKEN_WINERRORS = {10048, 10013}
+
+
+def _is_port_taken_error(exc: OSError) -> bool:
+    """Return True if *exc* from ``bind()`` means the port is unavailable."""
+    if exc.errno in _PORT_TAKEN_ERRNOS:
+        return True
+    # ``winerror`` only exists on Windows, and only sometimes matches errno.
+    if getattr(exc, "winerror", None) in _PORT_TAKEN_WINERRORS:
+        return True
+    text = str(exc).lower()
+    return (
+        "address already in use" in text
+        or "only one usage of each socket address" in text
+    )
+
+
+def _port_owner_hint(port: int) -> str:
+    """Return a platform-appropriate command for finding the port's owner."""
+    if os.name == "nt":
+        return f"netstat -ano | findstr :{port}"
+    return f"lsof -i :{port}"
+
+
 def _create_server(port: int) -> http.server.ThreadingHTTPServer:
     """Create and return a ThreadingHTTPServer bound to *port*.
 
@@ -53,15 +86,15 @@ def _create_server(port: int) -> http.server.ThreadingHTTPServer:
     try:
         return http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     except OSError as e:
-        if e.errno == 48 or "Address already in use" in str(e):
+        if _is_port_taken_error(e):
             logger.error(
                 "Port %d is already in use by another process.\n"
                 "  → Try a different port with:  harbor --port <number>\n"
                 "  → Or find and stop the process using port %d:\n"
-                "       lsof -i :%d",
+                "       %s",
                 port,
                 port,
-                port,
+                _port_owner_hint(port),
             )
             sys.exit(1)
         raise
@@ -276,6 +309,29 @@ def _run_server(args: argparse.Namespace) -> int:
         datefmt="%H:%M:%S",
     )
 
+    # --- Refuse to double-start against a running instance -------------
+    # PID/port/token are process-wide singletons: a second instance would
+    # overwrite them and, on exit (including a failed startup), delete them —
+    # leaving the instance that is actually serving without working
+    # `harbor status` / `harbor stop`.  Daemon mode writes its own PID before
+    # calling us, hence the self-PID check.
+    from . import daemon as _daemon_mod
+
+    existing_pid = _daemon_mod._read_pid()
+    if (
+        existing_pid
+        and existing_pid != os.getpid()
+        and _daemon_mod._is_process_alive(existing_pid)
+    ):
+        logger.error(
+            "Harbor is already running (PID %d).\n"
+            "  → Open it with:        harbor status   (prints the URL)\n"
+            "  → Restart it with:     harbor stop && harbor start\n"
+            "  → Or use another port: harbor --port <number>",
+            existing_pid,
+        )
+        return 1
+
     # --- Load config --------------------------------------------------
     config = config_mod.load_config(args.config)
 
@@ -349,6 +405,12 @@ def _run_server(args: argparse.Namespace) -> int:
     )
     # Share state with the server module (read by every Handler instance).
     server_mod.app_state = state
+
+    # Bind before touching the state files: if the port is taken (e.g. another
+    # Harbor already serving), _create_server exits here and the running
+    # instance's PID/token/port files are left untouched.
+    httpd = _create_server(port)
+
     # Background repo-status refresher: /api/repos serves a cached snapshot
     # instead of blocking on per-repo git subprocesses on every request.
     server_mod.start_status_refresher(state)
@@ -363,8 +425,6 @@ def _run_server(args: argparse.Namespace) -> int:
     # foreground and daemon mode.  In daemon mode the PID file was already
     # written by daemon.py — overwriting with the same value is fine.
     try:
-        from . import daemon as _daemon_mod
-
         _daemon_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
         # PID file (0644 — harmless, just a number)
         _daemon_mod.PID_FILE.write_text(str(os.getpid()))
@@ -416,7 +476,6 @@ def _run_server(args: argparse.Namespace) -> int:
 
         signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    httpd = _create_server(port)
     url = f"http://127.0.0.1:{port}/?token={token}"
     logger.info("serving at http://127.0.0.1:%d/?token=<hidden>", port)
     logger.info(
