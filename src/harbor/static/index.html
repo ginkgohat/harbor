@@ -1280,7 +1280,10 @@ async function waitForScan(scanSeq, epoch, timeoutMs) {
 // the background, so `waitForScan` can return while ahead/behind still changes.
 // Poll quietly (no toast, no busy button) until the fetch phase ends and then
 // render the upstream-true counts; a slow remote never delays the refresh.
-const FETCH_WAIT_MS = 30000;
+// Covers the server's worst case — a 20s overall fetch budget plus waiting for
+// fetches that had already started (20s each) — so this only gives up on a
+// phase that is genuinely stuck; the 30s poll picks the result up afterwards.
+const FETCH_WAIT_MS = 45000;
 
 async function refreshAfterFetch(epoch) {
   const deadline = Date.now() + FETCH_WAIT_MS;
