@@ -21,9 +21,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # How long a pull waits for an in-flight background fetch before proceeding
-# anyway.  Mirrors git.FETCH_BUDGET (20s) plus margin; duplicated here because
-# this module stays free of git/server imports.
-PULL_GATE_TIMEOUT = 25.0
+# anyway.  Covers the fetch phase's own bounds — the 20s budget plus waiting
+# out already-started fetches (20s each) — so the gate normally opens well
+# before this.  It is a safety valve, not the expected wait.  Kept local
+# because this module stays free of git/server imports.
+PULL_GATE_TIMEOUT = 45.0
 
 
 @dataclass

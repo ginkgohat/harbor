@@ -375,7 +375,10 @@ def fetch_repos(
 
     *timeout* bounds a single ``git fetch``; *budget* bounds the whole phase in
     wall-clock seconds so a dead network cannot stall the refresh button (or
-    the rescan single-flight) for ``ceil(N/FETCH_WORKERS) * timeout``.
+    the rescan single-flight) for ``ceil(N/FETCH_WORKERS) * timeout``.  Fetches
+    that already started when the budget runs out are still awaited (bounded
+    by *timeout*): their ref locks outlive this call, and a pull that started
+    meanwhile would fail on them.
     """
     if not repos:
         return []
@@ -421,11 +424,25 @@ def fetch_repos(
                 f"{labels.get(id(fut), '<unknown>')}: skipped "
                 f"(overall fetch budget of {budget:g}s exceeded)"
             )
+        # cancel() only stops fetches that never started.  A `git fetch` that
+        # is already running keeps holding the remote's ref locks until its own
+        # timeout, so returning now would let a user pull start right into
+        # them.  Wait for the started ones (bounded by *timeout*, which is what
+        # already bounds each of them).
+        started = [fut for fut in not_done if not fut.done()]
+        if started:
+            _, still_running = wait(started, timeout=timeout)
+            if still_running:
+                logger.warning(
+                    "%d fetch(es) still running after budget %gs + %gs; a pull "
+                    "may collide with their ref locks",
+                    len(still_running),
+                    budget,
+                    timeout,
+                )
     except Exception as exc:  # never let the fetch phase break a refresh
         failures.append(f"<fetch phase>: {type(exc).__name__}: {exc}")
     finally:
-        # Do not block the rescan on stragglers: their own subprocess timeout
-        # still bounds them and the pool threads unwind on their own.
         pool.shutdown(wait=False, cancel_futures=True)
     return failures
 

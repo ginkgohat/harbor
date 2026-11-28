@@ -681,28 +681,51 @@ def _periodic_rescan_once(app: HarborApp) -> tuple[int, bool]:
     return _request_rescan(app)
 
 
-def _rescan_loop(app: HarborApp) -> None:
-    """Rescan immediately (startup) and then every ``RESCAN_INTERVAL``.
+def _rescan_loop(app: HarborApp, rescan_now: bool = True) -> None:
+    """Rescan immediately (unless *rescan_now* is false) and then hourly.
 
     Runs until the process exits (daemon thread).  A failure to enqueue a
-    request is logged and retried on the next tick.
+    request is logged and retried on the next tick.  The daemon passes
+    ``rescan_now=False`` after its own startup scan so a large tree is not
+    walked twice in the first second.
     """
     while True:
-        try:
-            _periodic_rescan_once(app)
-        except Exception:
-            logger.exception("periodic rescan failed; will retry")
+        if rescan_now:
+            try:
+                _periodic_rescan_once(app)
+            except Exception:
+                logger.exception("periodic rescan failed; will retry")
+        rescan_now = True
         time.sleep(RESCAN_INTERVAL)
 
 
-def start_periodic_rescan(app: HarborApp) -> None:
+def start_periodic_rescan(app: HarborApp, rescan_now: bool = True) -> None:
     """Start the startup/periodic rescan daemon thread (idempotent)."""
     if app.rescan_thread is not None and app.rescan_thread.is_alive():
         return
     app.rescan_thread = threading.Thread(
-        target=_rescan_loop, args=(app,), daemon=True, name="periodic-rescan"
+        target=_rescan_loop,
+        args=(app, rescan_now),
+        daemon=True,
+        name="periodic-rescan",
     )
     app.rescan_thread.start()
+
+
+def start_fetch_for_current(app: HarborApp) -> None:
+    """Fetch the current repo set in the background (startup kick).
+
+    Used after the daemon's own initial scan, which publishes local status but
+    does not fetch.  Without it, startup ahead/behind would wait for the next
+    periodic rescan.
+    """
+    if not app.fetch_on_scan:
+        return
+    with app.state_lock:
+        repos = app.repos
+        generation = app.scan_generation
+    if repos:
+        _start_fetch(app, repos, generation)
 
 
 # ---------------------------------------------------------------------------
@@ -831,9 +854,12 @@ def _start_fetch(
     discovers new repos while the network is slow is still fetched now rather
     than at the next hourly pass.
     """
-    with app.state_lock:
+    # Publish "pending" and take ownership of the fetch in one critical
+    # section (state_lock → fetch_lock, the same order _fetch_and_republish
+    # uses).  Done separately, an older fetch's finally could clear the flag
+    # in between, leaving a running fetch that /api/repos reports as finished.
+    with app.state_lock, app.fetch_lock:
         app.fetch_pending = True
-    with app.fetch_lock:
         if app.fetching:
             app.fetch_requested = True
             return

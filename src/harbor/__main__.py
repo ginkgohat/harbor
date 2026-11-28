@@ -406,17 +406,27 @@ def _run_server(args: argparse.Namespace) -> int:
     # Share state with the server module (read by every Handler instance).
     server_mod.app_state = state
 
+    # Startup rescans should fetch remotes (unless the config disables it).
+    fetch_setting = (config or {}).get("fetch")
+    if isinstance(fetch_setting, bool):
+        state.fetch_on_scan = fetch_setting
+
     # Bind before touching the state files: if the port is taken (e.g. another
     # Harbor already serving), _create_server exits here and the running
     # instance's PID/token/port files are left untouched.
     httpd = _create_server(port)
 
-    # Publish the port as soon as the socket is bound.  Readiness checks
-    # (`harbor start`, `harbor status`) key off this file, so writing it here
-    # makes "started" mean "bound and able to serve" rather than "scanned".
+    # Publish the port as soon as the socket is bound.  `harbor status` reads
+    # it for the URL; readiness itself waits for the ready marker written just
+    # before `serve_forever` (bind happens before the initial scan and before
+    # the token exists, so it would overstate how far along startup is).
     try:
         _daemon_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
         _daemon_mod.PORT_FILE.write_text(str(port))
+        # A leftover marker from a crashed run must not make this process look
+        # ready while it is still scanning.
+        with contextlib.suppress(OSError):
+            _daemon_mod.READY_FILE.unlink()
         # Registered before the scan: a failure (or a SIGTERM) between here and
         # the normal exit path must not leave a stale port file behind, which
         # is what makes `harbor start` claim success for a dead process.
@@ -439,11 +449,12 @@ def _run_server(args: argparse.Namespace) -> int:
     # instead of blocking on per-repo git subprocesses on every request.
     server_mod.start_status_refresher(state)
 
-    # Startup + periodic rescan: run the same walk/fetch pass as the Refresh
-    # button right away (so ahead/behind is upstream-true without a click) and
-    # then every RESCAN_INTERVAL (so new clones show up on their own).  Both
-    # run after the socket is bound, so the UI is served immediately.
-    server_mod.start_periodic_rescan(state)
+    # Startup + periodic rescan: the scan above already ran, so the loop waits
+    # a full interval instead of walking the roots a second time right away.
+    # The startup fetch runs in the background (same pass a rescan's fetch
+    # would do), keeping ahead/behind upstream-true without a click.
+    server_mod.start_periodic_rescan(state, rescan_now=False)
+    server_mod.start_fetch_for_current(state)
 
     # --- Authentication token + PID file -------------------------------
     # T-011: generate a random token and include it in the URL.
@@ -471,7 +482,6 @@ def _run_server(args: argparse.Namespace) -> int:
             state.session_secret = _daemon_mod.SESSION_SECRET_FILE.read_bytes()
         else:
             secret = os.urandom(32)
-            import contextlib
 
             try:
                 with contextlib.suppress(FileNotFoundError):
@@ -512,6 +522,12 @@ def _run_server(args: argparse.Namespace) -> int:
 
     if not args.no_browser:
         threading.Timer(0.5, lambda: _try_open_browser(url)).start()
+
+    # Readiness marker: the socket is bound, the initial scan is published and
+    # the token is on disk, so the URL `harbor status` prints will work.  This
+    # is what `harbor start`'s readiness check and `cmd_status` look for.
+    with contextlib.suppress(OSError):
+        _daemon_mod.READY_FILE.write_text(str(port))
 
     try:
         httpd.serve_forever()

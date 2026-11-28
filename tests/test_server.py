@@ -882,6 +882,7 @@ def test_cli_roots_not_persisted_to_config(tmp_path, monkeypatch):
         ("LOG_FILE", "harbor.log"),
         ("TOKEN_FILE", "harbor.token"),
         ("PORT_FILE", "harbor.port"),
+        ("READY_FILE", "harbor.ready"),
         ("SESSION_SECRET_FILE", "harbor.credentials"),
     ):
         monkeypatch.setattr(daemon_mod, attr, state_dir / filename)
@@ -943,6 +944,7 @@ def _redirect_daemon_state(monkeypatch, tmp_path):
         ("LOG_FILE", "harbor.log"),
         ("TOKEN_FILE", "harbor.token"),
         ("PORT_FILE", "harbor.port"),
+        ("READY_FILE", "harbor.ready"),
         ("SESSION_SECRET_FILE", "harbor.credentials"),
     ):
         monkeypatch.setattr(daemon_mod, attr, state_dir / filename)
@@ -1063,6 +1065,10 @@ def test_run_server_binds_before_scanning(monkeypatch, tmp_path):
 
     class _Server:
         def serve_forever(self):
+            # Readiness must only be claimed once the process is about to
+            # serve — after the scan and the token write, not at bind time.
+            order.append("serve")
+            assert (state_dir / "harbor.ready").is_file()
             raise SystemExit(0)
 
         def shutdown(self):
@@ -1078,7 +1084,12 @@ def test_run_server_binds_before_scanning(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("harbor.__main__._try_open_browser", lambda url: None)
     monkeypatch.setattr("harbor.__main__.server_mod.start_status_refresher", lambda a: None)
-    monkeypatch.setattr("harbor.__main__.server_mod.start_periodic_rescan", lambda a: None)
+    monkeypatch.setattr(
+        "harbor.__main__.server_mod.start_periodic_rescan", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "harbor.__main__.server_mod.start_fetch_for_current", lambda a: None
+    )
 
     class _NoAtexit:
         @staticmethod
@@ -1099,9 +1110,72 @@ def test_run_server_binds_before_scanning(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         _run_server(args)
 
-    assert order == ["bind", "scan"]
-    # The port file is published at bind time, which is what readiness checks.
+    assert order == ["bind", "scan", "serve"]
+    # The port file is published at bind time, which is what readiness checks
+    # used before the ready marker existed; it still backs `harbor status`'s URL.
     assert (state_dir / "harbor.port").read_text() == "8765"
+
+
+def test_run_server_does_not_scan_twice_at_startup(monkeypatch, tmp_path):
+    """The startup scan replaces the periodic loop's immediate first pass.
+
+    The loop used to run a full scan right after the startup scan, walking a
+    large tree twice within the first second of startup.
+    """
+    from harbor import daemon as daemon_mod
+    from harbor.__main__ import _build_parser, _run_server
+
+    _redirect_daemon_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon_mod, "_read_pid", lambda: None)
+    scans: list[str] = []
+    calls: dict[str, object] = {}
+
+    class _Server:
+        def serve_forever(self):
+            raise SystemExit(0)
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr("harbor.__main__._create_server", lambda port: _Server())
+    monkeypatch.setattr(
+        "harbor.__main__.scanner_mod.scan_roots",
+        lambda *a, **k: scans.append("scan") or {},
+    )
+    monkeypatch.setattr("harbor.__main__._try_open_browser", lambda url: None)
+    monkeypatch.setattr("harbor.__main__.server_mod.start_status_refresher", lambda a: None)
+    monkeypatch.setattr(
+        "harbor.__main__.server_mod.start_periodic_rescan",
+        lambda app, rescan_now=True: calls.setdefault("rescan_now", rescan_now),
+    )
+    monkeypatch.setattr(
+        "harbor.__main__.server_mod.start_fetch_for_current",
+        lambda app: calls.setdefault("fetch", True),
+    )
+
+    class _NoAtexit:
+        @staticmethod
+        def register(fn):
+            pass
+
+    monkeypatch.setattr("harbor.__main__.atexit", _NoAtexit)
+
+    args = _build_parser().parse_args(
+        [
+            "serve",
+            str(tmp_path),
+            "--config",
+            str(tmp_path / "config.toml"),
+            "--no-browser",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        _run_server(args)
+
+    assert scans == ["scan"]
+    # The scan above is the first pass, so the periodic loop must wait an
+    # interval; the fetch still happens now, in the background.
+    assert calls == {"rescan_now": False, "fetch": True}
 
 
 # ---------------------------------------------------------------------------
@@ -1803,6 +1877,63 @@ def test_fetch_skipped_while_a_pull_is_running(monkeypatch):
     assert app.fetching is False
 
 
+def test_start_fetch_marks_pending_while_holding_the_state_lock(monkeypatch):
+    """Regression: "fetch pending" must be published atomically with starting.
+
+    Otherwise an older fetch's ``finally`` can slip between the two steps,
+    clear ``fetch_pending``, and leave a running fetch that /api/repos reports
+    as finished — exactly the stale-until-the-next-poll behaviour this design
+    removes.
+    """
+    app = HarborApp()
+    spawned: list[object] = []
+    monkeypatch.setattr(server, "_spawn_fetch", lambda a, r, g: spawned.append(a))
+
+    depth = {"state": 0, "fetch_seen_at": []}
+    real_state = app.state_lock
+    real_fetch = app.fetch_lock
+
+    class _Tracked:
+        """Wraps a lock and records whether state_lock was held."""
+
+        def __init__(self, real, name):
+            self._real = real
+            self._name = name
+
+        def acquire(self, *args, **kwargs):
+            if self._name == "fetch":
+                depth["fetch_seen_at"].append(depth["state"] > 0)
+            self._real.acquire(*args, **kwargs)
+            if self._name == "state":
+                depth["state"] += 1
+            return True
+
+        def release(self):
+            if self._name == "state":
+                depth["state"] -= 1
+            self._real.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    app.state_lock = _Tracked(real_state, "state")  # type: ignore[assignment]
+    app.fetch_lock = _Tracked(real_fetch, "fetch")  # type: ignore[assignment]
+    try:
+        server._start_fetch(app, {"r1": {"name": "r1", "path": "/r1"}}, 1)
+    finally:
+        app.state_lock = real_state
+        app.fetch_lock = real_fetch
+
+    assert spawned == [app]
+    assert app.fetching is True
+    assert app.fetch_pending is True
+    assert depth["fetch_seen_at"] == [True]
+
+
 def test_pull_waits_for_an_inflight_fetch():
     """A pull must not start while a fetch is updating the same refs."""
     app = HarborApp()
@@ -2072,13 +2203,62 @@ def test_rescan_loop_runs_immediately_then_sleeps_interval(monkeypatch):
     assert sleeps == [server.RESCAN_INTERVAL]
 
 
+def test_rescan_loop_can_skip_the_immediate_pass(monkeypatch):
+    """After a startup scan the loop waits a full interval before scanning."""
+    app = HarborApp()
+    calls = []
+    sleeps = []
+
+    class _Wake(Exception):
+        pass
+
+    def _fake_once(app_):
+        calls.append(app_)
+        return (1, False)
+
+    def _fake_sleep(seconds):
+        sleeps.append(seconds)
+        raise _Wake(seconds)
+
+    monkeypatch.setattr(server, "_periodic_rescan_once", _fake_once)
+    monkeypatch.setattr(server.time, "sleep", _fake_sleep)
+    with pytest.raises(_Wake):
+        server._rescan_loop(app, rescan_now=False)
+    # It slept first, without scanning: the daemon already walked the roots.
+    assert calls == []
+    assert sleeps == [server.RESCAN_INTERVAL]
+
+
+def test_start_fetch_for_current_fetches_the_current_snapshot(monkeypatch):
+    app = HarborApp()
+    app.repos = {"r1": {"name": "r1", "path": "/r1"}}
+    app.scan_generation = 3
+    calls = []
+    monkeypatch.setattr(
+        server, "_start_fetch", lambda a, r, g: calls.append((a, r, g))
+    )
+    server.start_fetch_for_current(app)
+    assert calls == [(app, app.repos, 3)]
+
+
+def test_start_fetch_for_current_skips_when_disabled_or_empty(monkeypatch):
+    app = HarborApp()
+    calls = []
+    monkeypatch.setattr(server, "_start_fetch", lambda a, r, g: calls.append(r))
+    server.start_fetch_for_current(app)  # no repos yet
+    app.repos = {"r1": {"name": "r1", "path": "/r1"}}
+    app.fetch_on_scan = False
+    server.start_fetch_for_current(app)  # fetch = false in the config
+    assert calls == []
+
+
 def test_start_periodic_rescan_is_idempotent(monkeypatch):
     """Calling start twice must not spawn two periodic scanners."""
     app = HarborApp()
     started = threading.Event()
     release = threading.Event()
 
-    def _blocking_loop(app_):
+    def _blocking_loop(app_, rescan_now=True):
         started.set()
         release.wait(5)
 

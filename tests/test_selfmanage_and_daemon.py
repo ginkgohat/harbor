@@ -28,6 +28,7 @@ def _isolated_daemon_state(tmp_path, monkeypatch):
         ("LOG_FILE", "harbor.log"),
         ("TOKEN_FILE", "harbor.token"),
         ("PORT_FILE", "harbor.port"),
+        ("READY_FILE", "harbor.ready"),
         ("SESSION_SECRET_FILE", "harbor.credentials"),
     ):
         monkeypatch.setattr(daemon, attr, tmp_path / filename)
@@ -505,6 +506,7 @@ class TestCmdStatus:
         pid_file = tmp_path / "harbor.pid"
         pid_file.write_text(str(os.getpid()))
         (tmp_path / "harbor.port").write_text("8765")
+        (tmp_path / "harbor.ready").write_text("8765")
         monkeypatch.setattr(daemon, "PID_FILE", pid_file)
         monkeypatch.setattr(daemon, "LOG_FILE", tmp_path / "harbor.log")
         rc = daemon.cmd_status()
@@ -512,15 +514,16 @@ class TestCmdStatus:
         captured = capsys.readouterr()
         assert "running" in captured.out
 
-    def test_starting_before_the_port_file_exists(self, capsys, tmp_path, monkeypatch):
-        """An alive PID without a port file means "starting", not "serving".
+    def test_starting_before_the_ready_file_exists(self, capsys, tmp_path, monkeypatch):
+        """An alive PID without the ready marker means "starting", not "serving".
 
-        The daemon writes its PID before it binds, so `harbor status` used to
-        claim a still-scanning (or already doomed) child was up — with no URL,
-        because the token/port are written at bind time.
+        The daemon writes its PID and binds its socket before the initial scan
+        and the token file, so `harbor status` used to claim a process that
+        was not accepting connections yet was up — with no URL to show.
         """
         pid_file = tmp_path / "harbor.pid"
         pid_file.write_text(str(os.getpid()))
+        (tmp_path / "harbor.port").write_text("8765")
         monkeypatch.setattr(daemon, "PID_FILE", pid_file)
         monkeypatch.setattr(daemon, "LOG_FILE", tmp_path / "harbor.log")
         rc = daemon.cmd_status()
@@ -591,13 +594,21 @@ class TestCmdStart:
 
 
 class TestWaitForStartup:
-    def test_ready_when_port_file_appears(self, monkeypatch):
+    def test_ready_when_ready_file_appears(self, monkeypatch):
         daemon.PID_FILE.write_text("123")
         daemon.PORT_FILE.write_text("8765")
+        daemon.READY_FILE.write_text("8765")
         monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: True)
         assert daemon._wait_for_startup(0.5) == (123, True)
 
-    def test_starting_when_alive_without_port_file(self, monkeypatch):
+    def test_not_ready_with_only_a_port_file(self, monkeypatch):
+        """Binding is not readiness: the child still scans and writes the token."""
+        daemon.PID_FILE.write_text("123")
+        daemon.PORT_FILE.write_text("8765")
+        monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: True)
+        assert daemon._wait_for_startup(0.05) == (123, False)
+
+    def test_starting_when_alive_without_ready_file(self, monkeypatch):
         daemon.PID_FILE.write_text("123")
         monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: True)
         assert daemon._wait_for_startup(0.05) == (123, False)

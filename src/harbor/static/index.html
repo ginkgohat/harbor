@@ -1303,8 +1303,13 @@ async function refreshAfterFetch(epoch) {
       continue;
     }
     lastScanDone = h.done;
-    repos = body;
-    render();
+    // Only touch the DOM when the snapshot actually changed: on a slow remote
+    // this loop runs every 600ms and a full re-render of the dashboard is
+    // wasted work while nothing has moved.
+    if (JSON.stringify(body) !== JSON.stringify(repos)) {
+      repos = body;
+      render();
+    }
     if (!h.fetchPending) return;
   }
 }
