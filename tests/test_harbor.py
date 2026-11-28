@@ -977,6 +977,16 @@ def test_resolve_roots_fallback():
     assert roots[0][0] == os.getcwd()
 
 
+def test_resolve_roots_explicit_fallback_overrides_cwd(tmp_path):
+    """A caller that chdir'd away can supply the original directory.
+
+    The daemon chdir's to ``/``; without this the cwd fallback would scan the
+    entire filesystem.
+    """
+    roots = resolve_roots([], None, fallback=str(tmp_path))
+    assert roots == [(str(tmp_path), tmp_path.name)]
+
+
 # ---------------------------------------------------------------------------
 # __main__ — port-in-use error handling
 # ---------------------------------------------------------------------------
@@ -1309,8 +1319,67 @@ def test_fetch_repos_respects_overall_budget(monkeypatch):
     assert any("budget" in failure for failure in failures)
 
 
+def test_fetch_repos_waits_for_started_fetches_after_budget(monkeypatch):
+    """The budget stops waiting for results; it must not release a live fetch.
+
+    A `git fetch` that already started keeps holding remote ref locks after
+    ``fetch_repos`` gives up on it, so a pull allowed to start now would hit
+    exactly the ref-lock failure the fetch/pull interlock exists to prevent.
+    """
+    import threading
+
+    import harbor.git as git_mod
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def slow(path, timeout=None):
+        started.set()
+        release.wait(5)
+        finished.set()
+        return None
+
+    monkeypatch.setattr(git_mod, "fetch_remote", slow)
+    results: list[list[str]] = []
+    t = threading.Thread(
+        target=lambda: results.append(
+            fetch_repos({"r": {"name": "r", "path": "/r"}}, timeout=5, budget=0.05)
+        )
+    )
+    t.start()
+    try:
+        assert started.wait(2)
+        # The budget expired, but the fetch is still running.
+        time.sleep(0.2)
+        assert t.is_alive(), "fetch_repos returned while a fetch was still running"
+        assert finished.is_set() is False
+    finally:
+        release.set()
+    t.join(5)
+    assert finished.is_set()
+    assert results and any("budget" in failure for failure in results[0])
+
+
 def test_fetch_repos_tolerates_malformed_records():
     """A record without a path is reported, never raised."""
     failures = fetch_repos({"bad": {"name": "no-path"}})
     assert len(failures) == 1
     assert "invalid repo record" in failures[0]
+
+
+def test_get_repos_status_tolerates_shutdown_executor(monkeypatch):
+    """A daemon refresher racing interpreter shutdown must not log a traceback.
+
+    concurrent.futures tears the module-level executor down before daemon
+    threads are stopped, so a late status pass raises RuntimeError from
+    ``submit``.  There is nothing useful to compute while exiting.
+    """
+    import harbor.git as git_mod
+
+    class _DeadExecutor:
+        def map(self, *args, **kwargs):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(git_mod, "_EXECUTOR", _DeadExecutor())
+    assert git_mod.get_repos_status({"r": {"name": "r", "path": "/r"}}) is None

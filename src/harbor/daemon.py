@@ -28,9 +28,20 @@ PID_FILE = STATE_DIR / "harbor.pid"
 LOG_FILE = STATE_DIR / "harbor.log"
 TOKEN_FILE = STATE_DIR / "harbor.token"
 PORT_FILE = STATE_DIR / "harbor.port"
+# Written just before the process starts accepting connections — after the
+# socket is bound, the initial scan has run and the token exists.  Readiness
+# and `harbor status` key off this file, because the PID file appears at fork
+# time and the port file at bind time, both well before the server can answer.
+READY_FILE = STATE_DIR / "harbor.ready"
 # Persisted HMAC key used to sign web-session cookies (0600).  Surviving a
 # restart means a browser's login cookie stays valid across server restarts.
 SESSION_SECRET_FILE = STATE_DIR / "harbor.credentials"
+
+
+# How long `harbor start`'s parent waits for the child to bind its socket
+# before reporting "starting" instead of "started".  A normal start binds in
+# well under this; a large first scan legitimately takes longer.
+STARTUP_READY_TIMEOUT = 2.0
 
 
 def _read_pid() -> int | None:
@@ -51,13 +62,15 @@ def _write_pid(pid: int) -> None:
 
 
 def _remove_pid() -> None:
-    """Remove the PID / token / port files if they exist."""
+    """Remove the PID / token / port / ready files if they exist."""
     with suppress(FileNotFoundError):
         PID_FILE.unlink()
     with suppress(FileNotFoundError):
         TOKEN_FILE.unlink()
     with suppress(FileNotFoundError):
         PORT_FILE.unlink()
+    with suppress(FileNotFoundError):
+        READY_FILE.unlink()
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -72,6 +85,32 @@ def _is_process_alive(pid: int) -> bool:
         # we treat as "not alive" but it's ambiguous — return False.
         return e.errno == errno.EPERM
     return True
+
+
+def _wait_for_startup(timeout: float) -> tuple[int | None, bool]:
+    """Wait briefly for the daemon's PID and its ready-to-serve marker.
+
+    The child writes the PID file as soon as it forks (so ``harbor stop``
+    works mid-scan), binds the socket next, and writes the ready file only
+    once the initial scan is done and the token exists — just before it starts
+    accepting connections.  Returns ``(pid, ready)``: ``pid`` is ``None`` when
+    the child is gone, and ``ready`` is ``True`` only once the ready file
+    exists — otherwise the process is still starting and the caller must not
+    claim it "started".
+    """
+    deadline = time.monotonic() + timeout
+    pid: int | None = None
+    while True:
+        current = _read_pid()
+        if current is not None:
+            pid = current
+        if pid is not None and not _is_process_alive(pid):
+            return None, False
+        if pid is not None and READY_FILE.is_file():
+            return pid, True
+        if time.monotonic() >= deadline:
+            return pid, False
+        time.sleep(0.05)
 
 
 def _pid_start_time(pid: int) -> float | None:
@@ -118,31 +157,41 @@ def cmd_start(serve_args: argparse.Namespace) -> int:
         print(f"  Log: {LOG_FILE}")
         return 0
 
-    # Stale PID file — clean it up.
-    if existing_pid:
-        _remove_pid()
+    # Not running: clear leftover state.  Removing the port file too matters
+    # for the readiness check below — a leftover from a crashed run must not
+    # make a still-scanning child look ready.
+    _remove_pid()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     # In daemon mode, don't auto-open the browser.
     serve_args.no_browser = True
+    # The daemon chdir's to "/" so it doesn't hold the launch directory open.
+    # Pin the launch directory now: without it, a bare `harbor start` with no
+    # saved roots resolves its cwd fallback to "/" and walks the whole disk.
+    serve_args.cwd = os.getcwd()
 
     # --- Daemonize ----------------------------------------------------
     # First fork.
     pid = os.fork()
     if pid > 0:
-        # Parent — wait briefly and report status.
-        time.sleep(0.3)
-        child_pid = _read_pid()
-        if child_pid and _is_process_alive(child_pid):
-            print(f"Harbor started in background (PID {child_pid}).")
-            print(f"  Log: {LOG_FILE}")
-            print("  Stop with:  harbor stop")
-            print("  Status:     harbor status")
-        else:
+        # Parent — wait until the child has bound its socket (or exited).
+        child_pid, ready = _wait_for_startup(STARTUP_READY_TIMEOUT)
+        if child_pid is None:
             print("Harbor failed to start. Check the log for details:")
             print(f"  {LOG_FILE}")
             return 1
+        if not ready:
+            # Still scanning a large tree, or blocked before binding.  Report
+            # honestly; the child may still fail afterwards (e.g. port in use).
+            print(f"Harbor is starting in the background (PID {child_pid}).")
+            print(f"  Log: {LOG_FILE}")
+            print("  Check with: harbor status")
+            return 0
+        print(f"Harbor started in background (PID {child_pid}).")
+        print(f"  Log: {LOG_FILE}")
+        print("  Stop with:  harbor stop")
+        print("  Status:     harbor status")
         return 0
 
     # First child — continue daemonization.
@@ -217,14 +266,29 @@ def cmd_status() -> int:
             f" since {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
+    # The daemon writes its PID at fork time and binds early, but only writes
+    # the ready marker (and the token) once it is about to accept connections.
+    # An alive PID without that marker is still starting — or already doomed
+    # by a port conflict — which is the same window `_wait_for_startup`
+    # refuses to call "started".  Saying "running" here would send the user
+    # looking for a URL that does not exist yet (or never will).
+    if not READY_FILE.is_file():
+        print(
+            f"Harbor is starting (PID {pid}){started_str}: "
+            "not accepting connections yet."
+        )
+        print(f"  Log:    {LOG_FILE}")
+        print("  Check again with: harbor status")
+        return 0
+
+    port: int | None = None
+    with suppress(OSError, ValueError):
+        port = int(PORT_FILE.read_text().strip())
     print(f"Harbor is running (PID {pid}){started_str}.")
     print(f"  Log:    {LOG_FILE}")
     # Show the auth token and URL if state files exist.
     try:
         token = TOKEN_FILE.read_text().strip()
-        port = None
-        with suppress(OSError, ValueError):
-            port = int(PORT_FILE.read_text().strip())
         if token:
             if port:
                 print(f"  URL:    http://127.0.0.1:{port}/?token={token}")

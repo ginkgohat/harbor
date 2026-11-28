@@ -303,15 +303,30 @@ STATUS_WORKERS = 8
 _EXECUTOR = ThreadPoolExecutor(max_workers=STATUS_WORKERS)
 
 
-def get_repos_status(repos: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def get_repos_status(
+    repos: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]] | None:
     """Return status for every repo in *repos*, collected concurrently.
 
     Each repo runs several git subprocesses; running them in a thread pool
     cuts total refresh latency roughly by the worker count and keeps one
     slow repo from extending the tail linearly.
+
+    Returns ``None`` when the shared executor is already shut down (interpreter
+    shutdown).  That is deliberately distinct from ``[]`` ("no repos"): callers
+    must keep the last good snapshot instead of publishing an empty one.
     """
     # map() preserves input order, matching the previous serial output.
-    return list(_EXECUTOR.map(repo_status, repos.values()))
+    try:
+        return list(_EXECUTOR.map(repo_status, repos.values()))
+    except RuntimeError:
+        # Interpreter shutdown: concurrent.futures has already torn the
+        # module-level executor down while a daemon refresher/fetch thread was
+        # still running.  The process is exiting, so there is nothing useful to
+        # compute; returning None avoids a noisy traceback and, unlike ``[]``,
+        # cannot be mistaken for a valid empty snapshot.
+        logger.debug("status executor is shut down; skipping status refresh")
+        return None
 
 
 def _repo_path(repo: Repo | dict[str, Any]) -> str:
@@ -360,7 +375,10 @@ def fetch_repos(
 
     *timeout* bounds a single ``git fetch``; *budget* bounds the whole phase in
     wall-clock seconds so a dead network cannot stall the refresh button (or
-    the rescan single-flight) for ``ceil(N/FETCH_WORKERS) * timeout``.
+    the rescan single-flight) for ``ceil(N/FETCH_WORKERS) * timeout``.  Fetches
+    that already started when the budget runs out are still awaited (bounded
+    by *timeout*): their ref locks outlive this call, and a pull that started
+    meanwhile would fail on them.
     """
     if not repos:
         return []
@@ -406,11 +424,25 @@ def fetch_repos(
                 f"{labels.get(id(fut), '<unknown>')}: skipped "
                 f"(overall fetch budget of {budget:g}s exceeded)"
             )
+        # cancel() only stops fetches that never started.  A `git fetch` that
+        # is already running keeps holding the remote's ref locks until its own
+        # timeout, so returning now would let a user pull start right into
+        # them.  Wait for the started ones (bounded by *timeout*, which is what
+        # already bounds each of them).
+        started = [fut for fut in not_done if not fut.done()]
+        if started:
+            _, still_running = wait(started, timeout=timeout)
+            if still_running:
+                logger.warning(
+                    "%d fetch(es) still running after budget %gs + %gs; a pull "
+                    "may collide with their ref locks",
+                    len(still_running),
+                    budget,
+                    timeout,
+                )
     except Exception as exc:  # never let the fetch phase break a refresh
         failures.append(f"<fetch phase>: {type(exc).__name__}: {exc}")
     finally:
-        # Do not block the rescan on stragglers: their own subprocess timeout
-        # still bounds them and the pool threads unwind on their own.
         pool.shutdown(wait=False, cancel_futures=True)
     return failures
 

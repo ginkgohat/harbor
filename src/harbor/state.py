@@ -15,9 +15,17 @@ attribute (``server.app_state``).
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+# How long a pull waits for an in-flight background fetch before proceeding
+# anyway.  Covers the fetch phase's own bounds — the 20s budget plus waiting
+# out already-started fetches (20s each) — so the gate normally opens well
+# before this.  It is a safety valve, not the expected wait.  Kept local
+# because this module stays free of git/server imports.
+PULL_GATE_TIMEOUT = 45.0
 
 
 @dataclass
@@ -49,6 +57,24 @@ class HarborApp:
         repo_status: Cached repo status snapshot (path → status dict), kept
             fresh in the background so /api/repos never blocks on git.
         refresher: The daemon thread running the refresh loop, if started.
+        fetch_pending: True while a rescan's background fetch/status pass is
+            still running after the local snapshot was published.
+        fetch_requested: True when a rescan needed a fetch while another fetch
+            was already running; the running pass re-fetches the current repo
+            set when it finishes instead of dropping the request.
+        fetching: True while a fetch thread is running (guards against
+            starting a second fetch concurrently).
+        fetch_lock: Guards ``fetching`` and ``fetch_requested``.
+        net_gate: Condition guarding ``net_fetching`` and ``net_pulls``, the
+            fetch ⇄ pull interlock (see :meth:`try_begin_fetch`).
+        net_fetching: True while a background fetch phase owns the remote refs.
+        net_pulls: Number of pulls currently running; a fetch yields while it
+            is non-zero.
+        status_generation: Monotonic version of ``repo_status``.  A pass that
+            computed a snapshot captures it and publishes only if no newer
+            publisher (rescan, fetch, fallback) won the race.
+        rescan_thread: The daemon thread running the startup/periodic rescan
+            loop, if started.
         scan_generation: Count of completed scans (frontend waits on it after
             kicking a background rescan via the X-Harbor-Scan-Gen header).
         rescanning: True while a background rescan worker is running.
@@ -110,6 +136,74 @@ class HarborApp:
     repo_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     # The daemon thread running the refresh loop (None until started).
     refresher: threading.Thread | None = None
+    # True between publishing a local snapshot and finishing the background
+    # fetch + post-fetch status pass.  Lets observers tell "local status is
+    # final" apart from "upstream counts are still being refreshed".
+    fetch_pending: bool = False
+    # True when a fetch was requested while another was running (the running
+    # pass catches up for the current repo set before clearing it).
+    fetch_requested: bool = False
+    # True while a fetch thread is running.  Separate from ``rescanning`` so a
+    # slow remote never blocks a later rescan's local publish.
+    fetching: bool = False
+    fetch_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Monotonic version of repo_status.  Bumped on every publish so a pass
+    # that computed from an older view can detect it lost the race (e.g. the
+    # 30s refresher finishing after a fetch republished the snapshot).
+    status_generation: int = 0
+    # The daemon thread running the startup/periodic rescan loop.
+    rescan_thread: threading.Thread | None = None
+
+    # --- fetch ⇄ pull interlock -------------------------------------
+    # A `git fetch` and a `git pull` that update the same remote-tracking ref
+    # at the same time make the pull fail ("cannot lock ref ... is at X but
+    # expected Y", reproduced 40/40 in a tight loop), so the two never
+    # overlap: a background fetch yields while any pull is running, and a pull
+    # waits (briefly) for an in-flight fetch before it starts.
+    net_gate: threading.Condition = field(default_factory=threading.Condition)
+    net_fetching: bool = False
+    net_pulls: int = 0
+
+    def try_begin_fetch(self) -> bool:
+        """Mark a background fetch phase as running.
+
+        Returns ``False`` when a pull is already running — the caller must
+        then skip the fetch entirely (the pull fetches the same remotes) and
+        must not call :meth:`end_fetch`.
+        """
+        with self.net_gate:
+            if self.net_pulls:
+                return False
+            self.net_fetching = True
+            return True
+
+    def end_fetch(self) -> None:
+        """Release the fetch phase and wake pulls waiting behind it."""
+        with self.net_gate:
+            self.net_fetching = False
+            self.net_gate.notify_all()
+
+    def begin_pull(self, timeout: float = PULL_GATE_TIMEOUT) -> None:
+        """Count a pull as active, first waiting out any in-flight fetch.
+
+        Waiting matters because the fetch updates the same refs; it is
+        bounded by *timeout* so a fetch that somehow overruns its own budget
+        can never wedge a user's pull forever.
+        """
+        deadline = time.monotonic() + timeout
+        with self.net_gate:
+            while self.net_fetching:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.net_gate.wait(remaining)
+            self.net_pulls += 1
+
+    def end_pull(self) -> None:
+        """Mark a pull as finished so a later fetch may start."""
+        with self.net_gate:
+            self.net_pulls = max(0, self.net_pulls - 1)
+            self.net_gate.notify_all()
 
     # --- background rescan ---
     # Count of completed scans; /api/repos reports it via the

@@ -118,20 +118,26 @@ def save_config(path: str | Path, config: dict[str, Any]) -> None:
 
 
 def resolve_roots(
-    cli_paths: list[str], config: dict[str, Any] | None
+    cli_paths: list[str],
+    config: dict[str, Any] | None,
+    fallback: str | None = None,
 ) -> list[tuple[str, str]]:
     """Resolve the list of (path, label) roots from CLI args.
 
     - If CLI paths are given, use them.
     - Otherwise, use the roots saved in the config file (e.g. added
       through the UI), if any.
-    - Otherwise, use the current working directory.
+    - Otherwise, use *fallback* (defaults to the current working directory).
 
     Rationale: ``harbor`` with no arguments and no saved roots should
     scan the current directory — this matches user intuition (like
     ``ls`` or ``code .``) and the README documentation. But once a user
     has explicitly added roots through the UI, those should persist
     across restarts instead of being silently dropped.
+
+    *fallback* exists for daemon mode, which ``chdir``s to ``/`` before
+    starting the server: the caller passes the directory the user launched
+    from so a bare ``harbor start`` cannot turn into a full-filesystem scan.
     """
     if cli_paths:
         return [
@@ -149,7 +155,8 @@ def resolve_roots(
             for root in config["roots"]
         ]
 
-    return [(os.getcwd(), os.path.basename(os.getcwd()))]
+    path = fallback or os.getcwd()
+    return [(path, os.path.basename(path))]
 
 
 def resolve_setting(

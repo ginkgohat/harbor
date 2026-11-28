@@ -372,13 +372,9 @@ def _run_server(args: argparse.Namespace) -> int:
         sys.exit(1)
 
     # --- Resolve roots ------------------------------------------------
-    roots = config_mod.resolve_roots(args.roots, config)
-    repos = scanner_mod.scan_roots(roots, min_depth=min_depth, max_depth=max_depth)
-
-    for path, label in roots:
-        count = sum(1 for r in repos.values() if r["root_label"] == label)
-        logger.info("scanned %s (%s) — %d repo(s)", path, label, count)
-    logger.info("total: %d repo(s) across %d root(s)", len(repos), len(roots))
+    roots = config_mod.resolve_roots(
+        args.roots, config, getattr(args, "cwd", None)
+    )
 
     # --- Resolve HTML path --------------------------------------------
     static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -388,8 +384,11 @@ def _run_server(args: argparse.Namespace) -> int:
         sys.exit(1)
 
     # --- Configure handler (HarborApp) ----------------------------------
+    # The repo list starts empty; the initial scan runs once the socket is
+    # bound (below), so a port conflict fails immediately instead of after a
+    # slow walk of a large tree.
     state = HarborApp(
-        repos=repos,
+        repos={},
         roots=roots,
         html_path=html_path,
         static_dir=static_dir,
@@ -399,22 +398,63 @@ def _run_server(args: argparse.Namespace) -> int:
         # Remember whether depth was set via CLI so hot-reload doesn't override it.
         cli_min_depth=args.min_depth,
         cli_max_depth=args.max_depth,
-        # The startup scan above is the first completed scan; the frontend
-        # waits for scan_generation to advance after kicking a background
-        # rescan (X-Harbor-Scan-Gen header).
-        scan_generation=1,
+        # The scan below is the first completed scan; the frontend waits for
+        # scan_generation to advance after kicking a background rescan
+        # (X-Harbor-Scan-Gen header).
+        scan_generation=0,
     )
     # Share state with the server module (read by every Handler instance).
     server_mod.app_state = state
+
+    # Startup rescans should fetch remotes (unless the config disables it).
+    fetch_setting = (config or {}).get("fetch")
+    if isinstance(fetch_setting, bool):
+        state.fetch_on_scan = fetch_setting
 
     # Bind before touching the state files: if the port is taken (e.g. another
     # Harbor already serving), _create_server exits here and the running
     # instance's PID/token/port files are left untouched.
     httpd = _create_server(port)
 
+    # Publish the port as soon as the socket is bound.  `harbor status` reads
+    # it for the URL; readiness itself waits for the ready marker written just
+    # before `serve_forever` (bind happens before the initial scan and before
+    # the token exists, so it would overstate how far along startup is).
+    try:
+        _daemon_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _daemon_mod.PORT_FILE.write_text(str(port))
+        # A leftover marker from a crashed run must not make this process look
+        # ready while it is still scanning.
+        with contextlib.suppress(OSError):
+            _daemon_mod.READY_FILE.unlink()
+        # Registered before the scan: a failure (or a SIGTERM) between here and
+        # the normal exit path must not leave a stale port file behind, which
+        # is what makes `harbor start` claim success for a dead process.
+        atexit.register(_daemon_mod._remove_pid)
+    except OSError:
+        # Non-fatal — the URL is also printed to the startup log.
+        pass
+
+    # --- Initial scan ---------------------------------------------------
+    repos = scanner_mod.scan_roots(roots, min_depth=min_depth, max_depth=max_depth)
+    for path, label in roots:
+        count = sum(1 for r in repos.values() if r["root_label"] == label)
+        logger.info("scanned %s (%s) — %d repo(s)", path, label, count)
+    logger.info("total: %d repo(s) across %d root(s)", len(repos), len(roots))
+    with state.state_lock:
+        state.repos = repos
+        state.scan_generation = 1
+
     # Background repo-status refresher: /api/repos serves a cached snapshot
     # instead of blocking on per-repo git subprocesses on every request.
     server_mod.start_status_refresher(state)
+
+    # Startup + periodic rescan: the scan above already ran, so the loop waits
+    # a full interval instead of walking the roots a second time right away.
+    # The startup fetch runs in the background (same pass a rescan's fetch
+    # would do), keeping ahead/behind upstream-true without a click.
+    server_mod.start_periodic_rescan(state, rescan_now=False)
+    server_mod.start_fetch_for_current(state)
 
     # --- Authentication token + PID file -------------------------------
     # T-011: generate a random token and include it in the URL.
@@ -429,8 +469,6 @@ def _run_server(args: argparse.Namespace) -> int:
         _daemon_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
         # PID file (0644 — harmless, just a number)
         _daemon_mod.PID_FILE.write_text(str(os.getpid()))
-        # Port file so `harbor status` can show the full URL
-        _daemon_mod.PORT_FILE.write_text(str(port))
         # Token file (0600 — sensitive)
         fd = os.open(
             str(_daemon_mod.TOKEN_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
@@ -444,7 +482,6 @@ def _run_server(args: argparse.Namespace) -> int:
             state.session_secret = _daemon_mod.SESSION_SECRET_FILE.read_bytes()
         else:
             secret = os.urandom(32)
-            import contextlib
 
             try:
                 with contextlib.suppress(FileNotFoundError):
@@ -460,9 +497,8 @@ def _run_server(args: argparse.Namespace) -> int:
                 # Non-fatal — fall back to the in-memory secret.
                 pass
             state.session_secret = secret
-        # Clean up both on exit (works for foreground mode; daemon mode
-        # already has its own atexit handler registered in daemon.py).
-        atexit.register(_daemon_mod._remove_pid)
+        # `_remove_pid` was registered at bind time; it cleans up the PID and
+        # token written here too.
     except OSError:
         # Non-fatal — the token is still visible in the startup log.
         pass
@@ -486,6 +522,12 @@ def _run_server(args: argparse.Namespace) -> int:
 
     if not args.no_browser:
         threading.Timer(0.5, lambda: _try_open_browser(url)).start()
+
+    # Readiness marker: the socket is bound, the initial scan is published and
+    # the token is on disk, so the URL `harbor status` prints will work.  This
+    # is what `harbor start`'s readiness check and `cmd_status` look for.
+    with contextlib.suppress(OSError):
+        _daemon_mod.READY_FILE.write_text(str(port))
 
     try:
         httpd.serve_forever()
