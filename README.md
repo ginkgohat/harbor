@@ -27,7 +27,7 @@ It's also intentionally simple: one Python package + a self-contained HTML front
 ## Features
 
 - **Multi-repo overview** — see every repo's branch, dirty/clean state, and ahead/behind count at a glance
-- **Refresh that really syncs** — Harbor rescans roots and runs `git fetch` in every repo at startup, periodically (every hour), and when you click Refresh, so ahead/behind reflects what is actually upstream (a commit pushed by a teammate shows up as "1 behind", just like with a manual `git pull`). The local snapshot renders instantly and the fetch continues in the background, so one slow remote never blocks the UI. Disable with `fetch = false`.
+- **Refresh that really syncs** — Harbor rescans roots and runs `git fetch` in every repo at startup, periodically (every hour), and when you click Refresh, so ahead/behind reflects what is actually upstream (a commit pushed by a teammate shows up as "1 behind", just like with a manual `git pull`). The locally computed status is published before any network work and the fetch continues in the background, so one slow remote never blocks the UI. Background fetches never overlap a pull (concurrent `git fetch` + `git pull` makes git fail on a ref lock). Disable with `fetch = false`.
 - **Batch Pull** — `git pull --ff-only` across all repos concurrently with real-time SSE progress
 - **Stash / Discard / Checkout main** — common operations on individual repos or in bulk
 - **Diff preview** — view uncommitted changes before discarding
@@ -307,7 +307,7 @@ reverse-proxy Harbor to an untrusted network.
 
 Harbor scans the given root directory for `.git` subdirectories using `os.walk` (cross-platform). For each repo it runs `git` commands to determine status, then serves the results as a JSON API. The frontend is a single-page HTML file that talks to this API, with SSE for real-time pull progress.
 
-Clicking **Refresh** — as well as startup and the hourly rescan — runs `git fetch` in every repo (concurrently, bounded per repo and ~20s overall). The locally computed status is published first so the page updates immediately; the fetch then updates ahead/behind in the background, measured against what actually exists upstream rather than the clone's last-known remote refs. A fetch failure (offline, no remote, auth prompt) never fails the refresh — that repo falls back to its local state.
+Clicking **Refresh** — as well as startup and the hourly rescan — runs `git fetch` in every repo (concurrently, bounded per repo and ~20s overall). The locally computed status is published before any network work, so the page updates without waiting on a remote; the fetch then updates ahead/behind in the background, measured against what actually exists upstream rather than the clone's last-known remote refs. A fetch failure (offline, no remote, auth prompt) never fails the refresh — that repo falls back to its local state. A background fetch is skipped while a pull is running, and a pull waits out one that is already in flight.
 
 For architecture details and project structure, see [CONTRIBUTING.md](CONTRIBUTING.md#project-structure).
 

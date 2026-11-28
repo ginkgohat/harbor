@@ -504,12 +504,31 @@ class TestCmdStatus:
     def test_running_process(self, capsys, tmp_path, monkeypatch):
         pid_file = tmp_path / "harbor.pid"
         pid_file.write_text(str(os.getpid()))
+        (tmp_path / "harbor.port").write_text("8765")
         monkeypatch.setattr(daemon, "PID_FILE", pid_file)
         monkeypatch.setattr(daemon, "LOG_FILE", tmp_path / "harbor.log")
         rc = daemon.cmd_status()
         assert rc == 0
         captured = capsys.readouterr()
         assert "running" in captured.out
+
+    def test_starting_before_the_port_file_exists(self, capsys, tmp_path, monkeypatch):
+        """An alive PID without a port file means "starting", not "serving".
+
+        The daemon writes its PID before it binds, so `harbor status` used to
+        claim a still-scanning (or already doomed) child was up — with no URL,
+        because the token/port are written at bind time.
+        """
+        pid_file = tmp_path / "harbor.pid"
+        pid_file.write_text(str(os.getpid()))
+        monkeypatch.setattr(daemon, "PID_FILE", pid_file)
+        monkeypatch.setattr(daemon, "LOG_FILE", tmp_path / "harbor.log")
+        rc = daemon.cmd_status()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "starting" in out
+        assert "not accepting connections" in out
+        assert "running" not in out
 
 
 class TestCmdStop:

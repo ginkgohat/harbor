@@ -352,7 +352,17 @@ def _post_repo_action(
     self: Handler, m: re.Match[str], parsed: ParseResult, body: Any
 ) -> None:
     path = unquote(m.group("path"))
-    outcome = git_ops.do_action(path, body.get("action"), app_state.repos)
+    action = body.get("action")
+    if action == "pull":
+        # A per-card pull must not race the background fetch either; the gate
+        # also makes it wait out a fetch that is already running.
+        app_state.begin_pull()
+        try:
+            outcome = git_ops.do_action(path, action, app_state.repos)
+        finally:
+            app_state.end_pull()
+    else:
+        outcome = git_ops.do_action(path, action, app_state.repos)
     # T-022: attach the repo's post-action status so the frontend can update
     # just this card instead of re-fetching every repo.  The status must be
     # sampled AFTER the action — discard/stash change state drastically.
@@ -554,6 +564,9 @@ def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
         app.jobs[job_id] = {"queue": q, "created": time.monotonic()}
 
     def worker() -> None:
+        # Count the whole batch as a pull so no background fetch starts while
+        # it runs (and wait out one that is already fetching).
+        app.begin_pull()
         try:
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
                 futures = [ex.submit(git_ops.pull_one, r, q) for r in repos.values()]
@@ -566,6 +579,7 @@ def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
                     except Exception as exc:
                         q.put({"error": str(exc), "repo": "<unknown>"})
         finally:
+            app.end_pull()
             # Pulls changed local branches; recompute the cached status
             # snapshot before signalling completion.  The frontend calls
             # loadRepos() as soon as it sees "done" — without this it would
@@ -861,29 +875,41 @@ def _fetch_and_republish(
     A rescan that landed mid-fetch set ``fetch_requested``; this pass then
     leaves ``fetching`` set, keeps ``fetch_pending`` on, and immediately starts
     another pass for the repo set that is current now.
+
+    Yields (skips the fetch) while a user pull is running: see
+    :meth:`HarborApp.try_begin_fetch`.
     """
     statuses: list[dict[str, Any]] | None = None
     catch_up = False
     next_repos = repos
     next_gen = generation
+    # The fetch phase yields to a running pull: concurrent `git fetch` and
+    # `git pull` in one repo make the pull fail on a ref lock, and the pull
+    # fetches those remotes anyway.
+    fetch_started = app.try_begin_fetch()
     try:
-        try:
-            failures = git_ops.fetch_repos(repos)
-        except Exception:
-            # fetch_repos promises never to raise; keep the refresh working
-            # even if that promise is ever broken.
-            logger.exception("rescan: fetch phase failed; using local refs")
+        if fetch_started:
+            try:
+                failures = git_ops.fetch_repos(repos)
+            except Exception:
+                # fetch_repos promises never to raise; keep the refresh
+                # working even if that promise is ever broken.
+                logger.exception("rescan: fetch phase failed; using local refs")
+            else:
+                if failures:
+                    logger.info(
+                        "rescan: fetched %d/%d repo(s); %d failed (using "
+                        "local refs): %s",
+                        len(repos) - len(failures),
+                        len(repos),
+                        len(failures),
+                        "; ".join(failures[:3]),
+                    )
+            finally:
+                app.end_fetch()
+            statuses = git_ops.get_repos_status(repos)
         else:
-            if failures:
-                logger.info(
-                    "rescan: fetched %d/%d repo(s); %d failed (using "
-                    "local refs): %s",
-                    len(repos) - len(failures),
-                    len(repos),
-                    len(failures),
-                    "; ".join(failures[:3]),
-                )
-        statuses = git_ops.get_repos_status(repos)
+            logger.info("rescan: a pull is running; skipping fetch")
     except Exception:
         logger.exception("rescan: post-fetch status refresh failed")
     finally:

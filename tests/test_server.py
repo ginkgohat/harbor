@@ -1770,6 +1770,131 @@ def test_fetch_republish_keeps_snapshot_when_status_unavailable():
 
 
 # ---------------------------------------------------------------------------
+# Background fetch vs. user pull
+# ---------------------------------------------------------------------------
+# `git fetch` and `git pull` updating the same remote-tracking ref makes the
+# pull fail with "cannot lock ref ... is at X but expected Y" (measured 40/40
+# in a tight loop).  The two must never overlap.
+
+
+def test_fetch_skipped_while_a_pull_is_running(monkeypatch):
+    """The background fetch yields instead of racing a user's pull."""
+    app = HarborApp()
+    repos = {"r1": {"name": "r1", "path": "/r1"}}
+    app.repos = repos
+    app.scan_generation = 1
+    app.repo_status = {"r1": {"name": "r1", "path": "/r1"}}
+    app.fetching = True
+    app.fetch_pending = True
+    fetched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        server.git_ops, "fetch_repos", lambda r: fetched.append(dict(r)) or []
+    )
+
+    app.begin_pull()
+    try:
+        server._fetch_and_republish(app, repos, 1)
+    finally:
+        app.end_pull()
+
+    assert fetched == []
+    # The pass still releases the fetch flags, or nothing would ever fetch again.
+    assert app.fetch_pending is False
+    assert app.fetching is False
+
+
+def test_pull_waits_for_an_inflight_fetch():
+    """A pull must not start while a fetch is updating the same refs."""
+    app = HarborApp()
+    assert app.try_begin_fetch() is True
+    pulling = threading.Event()
+
+    def _pull() -> None:
+        app.begin_pull(timeout=5)
+        pulling.set()
+        app.end_pull()
+
+    t = threading.Thread(target=_pull, daemon=True)
+    t.start()
+    try:
+        assert pulling.wait(0.2) is False  # blocked behind the fetch
+    finally:
+        app.end_fetch()
+    assert pulling.wait(5) is True
+    t.join(5)
+
+
+def test_begin_pull_does_not_block_forever_on_a_stuck_fetch():
+    """A fetch overrunning its own budget must not wedge user pulls."""
+    app = HarborApp()
+    assert app.try_begin_fetch() is True
+    started = time.monotonic()
+    app.begin_pull(timeout=0.05)
+    try:
+        assert time.monotonic() - started < 1.0
+    finally:
+        app.end_pull()
+        app.end_fetch()
+
+
+def test_fetch_refused_while_a_pull_is_active():
+    app = HarborApp()
+    app.begin_pull()
+    assert app.try_begin_fetch() is False
+    app.end_pull()
+    assert app.try_begin_fetch() is True
+    app.end_fetch()
+
+
+def test_pull_all_job_marks_the_pull_active(monkeypatch):
+    """The pull-all worker must count as a pull for the whole batch."""
+    app = server.app_state
+    app.jobs.clear()
+    assert app.try_begin_fetch() is True
+    app.end_fetch()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _pull(repo, q):
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(server.git_ops, "pull_one", _pull)
+    monkeypatch.setattr(server, "_refresh_once", lambda a: None)
+    server.start_pull_all_job({"fake": {"name": "fake", "path": "fake"}})
+    try:
+        assert started.wait(5)
+        assert app.try_begin_fetch() is False
+    finally:
+        release.set()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if app.try_begin_fetch():
+            app.end_fetch()
+            return
+        time.sleep(0.01)
+    pytest.fail("pull-all job never released the pull gate")
+
+
+def test_single_repo_pull_marks_the_pull_active(monkeypatch):
+    """A per-card pull is a pull too: no fetch may start while it runs."""
+    app = server.app_state
+    app.repos = {}
+    seen: dict[str, bool] = {}
+
+    def _do_action(path, action, repos):
+        seen["fetch_allowed"] = app.try_begin_fetch()
+        if seen["fetch_allowed"]:
+            app.end_fetch()
+        return server.git_ops.ActionOutcome(ok=True, output="ok", status="ok")
+
+    monkeypatch.setattr(server.git_ops, "do_action", _do_action)
+    h = _make_handler("POST", "/api/repo/fake/action", body=b'{"action": "pull"}')
+    h.do_POST()
+    assert seen == {"fetch_allowed": False}
+
+
+# ---------------------------------------------------------------------------
 # Rescan fetches remotes so refresh sees upstream commits
 # ---------------------------------------------------------------------------
 

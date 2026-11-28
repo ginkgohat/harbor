@@ -257,17 +257,31 @@ def cmd_status() -> int:
             f" since {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
+    # The daemon writes its PID before it binds, and the port/token files only
+    # once the socket is up, so an alive PID without a port file means the
+    # process is still starting — or already doomed by a port conflict.  This
+    # is the same window `_wait_for_startup` refuses to call "started", and
+    # saying "running" here would send the user looking for a URL that does
+    # not exist yet (or never will).
+    port: int | None = None
+    with suppress(OSError, ValueError):
+        port = int(PORT_FILE.read_text().strip())
+    if port is None:
+        print(
+            f"Harbor is starting (PID {pid}){started_str}: "
+            "not accepting connections yet."
+        )
+        print(f"  Log:    {LOG_FILE}")
+        print("  Check again with: harbor status")
+        return 0
+
     print(f"Harbor is running (PID {pid}){started_str}.")
     print(f"  Log:    {LOG_FILE}")
     # Show the auth token and URL if state files exist.
     try:
         token = TOKEN_FILE.read_text().strip()
-        port = None
-        with suppress(OSError, ValueError):
-            port = int(PORT_FILE.read_text().strip())
         if token:
-            if port:
-                print(f"  URL:    http://127.0.0.1:{port}/?token={token}")
+            print(f"  URL:    http://127.0.0.1:{port}/?token={token}")
             print(f"  Token:  {token}")
             print("  ⚠  Keep this private — it grants full access to Harbor.")
     except OSError:
