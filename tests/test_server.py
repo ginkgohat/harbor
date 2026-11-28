@@ -1650,47 +1650,176 @@ def test_refresh_once_preserves_snapshot_when_repos_rebound():
 # ---------------------------------------------------------------------------
 
 
-def test_rescan_fetches_remotes_before_status(monkeypatch, tmp_path):
-    """Rescan fetches before sampling status, so ahead/behind is upstream-true.
+def test_rescan_publishes_local_status_before_fetch(monkeypatch, tmp_path):
+    """Refresh renders local status immediately; the fetch runs afterwards.
 
-    Regression: the refresh button only rescanned local state; `git status`
-    compares against local remote-tracking refs, so a repo whose remote had
-    new commits (visible with `git pull` in a terminal) stayed "up to date"
-    in the dashboard until something else fetched.
+    A hanging remote used to hold the whole refresh for the fetch budget
+    (20s), so the button looked stuck.  The local snapshot is now published
+    first (advancing the scan protocol), then fetch + a second status pass
+    update it in the background.
     """
     app = server.app_state
     app.config_path = str(tmp_path / "config.toml")
     app.roots = []
     new_repos = {"r1": {"name": "r1", "path": "/r1"}}
-    order: list[tuple[str, list[str]]] = []
-    status = {"name": "r1", "path": "/r1", "dirty": False, "behind": 1}
+    local = {"name": "r1", "path": "/r1", "dirty": False, "behind": 0}
+    upstream = {"name": "r1", "path": "/r1", "dirty": False, "behind": 3}
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
 
     monkeypatch.setattr(
         server.scanner_mod, "scan_roots", lambda *a, **k: dict(new_repos)
     )
     monkeypatch.setattr(
         server.git_ops,
-        "fetch_repos",
-        lambda repos: order.append(("fetch", list(repos))) or [],
-    )
-    monkeypatch.setattr(
-        server.git_ops,
         "get_repos_status",
-        lambda repos: order.append(("status", list(repos))) or [status],
+        lambda repos: [upstream if fetch_started.is_set() else local],
     )
+
+    def _blocking_fetch(repos):
+        fetch_started.set()
+        release_fetch.wait(5)
+        return []
+
+    monkeypatch.setattr(server.git_ops, "fetch_repos", _blocking_fetch)
 
     h = _make_handler("POST", "/api/rescan", body=b"{}")
     h.do_POST()
-    code, _ = _read_response(h)
+    code, body = _read_response(h)
     assert code == 200
+    scan_seq = body["scan_seq"]
 
+    # While the fetch is still blocked, the local snapshot is already served.
     deadline = time.time() + 5
-    while app.scan_generation < 1 and time.time() < deadline:
+    while app.scan_completed_seq < scan_seq and time.time() < deadline:
         time.sleep(0.01)
-    assert app.scan_generation == 1
-    # Fetch has to happen first — otherwise status is computed from stale refs.
-    assert order == [("fetch", ["r1"]), ("status", ["r1"])]
+    assert app.scan_completed_seq >= scan_seq
+    assert app.repo_status["/r1"] == local
+    assert app.fetch_pending is True
+
+    # After the fetch, the snapshot reflects upstream-true status.
+    release_fetch.set()
+    deadline = time.time() + 5
+    while app.fetch_pending and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.fetch_pending is False
+    assert app.repo_status["/r1"] == upstream
+
+
+def test_rescan_during_inflight_fetch_does_not_wait_for_it(monkeypatch, tmp_path):
+    """A second refresh publishes while the first pass's fetch is still stuck.
+
+    The fetch phase must not hold the rescan single-flight lock: otherwise a
+    click that lands during a startup/periodic fetch waits for that remote
+    before its own local snapshot is published — exactly the 20s stall the
+    local-first design is meant to remove.
+    """
+    app = server.app_state
+    app.config_path = str(tmp_path / "config.toml")
+    app.roots = []
+    new_repos = {"r1": {"name": "r1", "path": "/r1"}}
+    status = {"name": "r1", "path": "/r1", "dirty": False, "behind": 0}
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+    fetch_calls = []
+
+    monkeypatch.setattr(
+        server.scanner_mod, "scan_roots", lambda *a, **k: dict(new_repos)
+    )
+    monkeypatch.setattr(server.git_ops, "get_repos_status", lambda repos: [status])
+
+    def _blocking_fetch(repos):
+        fetch_calls.append(list(repos))
+        fetch_started.set()
+        release_fetch.wait(5)
+        return []
+
+    monkeypatch.setattr(server.git_ops, "fetch_repos", _blocking_fetch)
+
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    _, first = _read_response(h)
+    assert fetch_started.wait(5)
+    assert app.fetch_pending is True
+
+    # The fetch is still blocked, but a new rescan must still complete.
+    h = _make_handler("POST", "/api/rescan", body=b"{}")
+    h.do_POST()
+    _, second = _read_response(h)
+    deadline = time.time() + 5
+    while app.scan_completed_seq < second["scan_seq"] and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.scan_completed_seq >= second["scan_seq"]
+    assert app.scan_completed_seq >= first["scan_seq"]
+    # The still-running fetch is not duplicated by the second pass.
+    assert fetch_calls == [list(new_repos)]
+    assert app.fetch_pending is True
+
+    release_fetch.set()
+    deadline = time.time() + 5
+    while app.fetch_pending and time.time() < deadline:
+        time.sleep(0.01)
+    assert app.fetch_pending is False
     assert app.repo_status["/r1"] == status
+
+
+def test_periodic_rescan_once_requests_a_scan(monkeypatch):
+    """The periodic tick goes through the same single-flight request path."""
+    app = HarborApp()
+    calls = []
+    monkeypatch.setattr(
+        server, "_request_rescan", lambda a: calls.append(a) or (7, False)
+    )
+    assert server._periodic_rescan_once(app) == (7, False)
+    assert calls == [app]
+
+
+def test_rescan_loop_runs_immediately_then_sleeps_interval(monkeypatch):
+    """The loop kicks a scan at startup (no initial delay) and repeats."""
+    app = HarborApp()
+    calls = []
+    sleeps = []
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_once(app_):
+        calls.append(app_)
+        return (1, False)
+
+    def _fake_sleep(seconds):
+        sleeps.append(seconds)
+        raise _Stop(seconds)
+
+    monkeypatch.setattr(server, "_periodic_rescan_once", _fake_once)
+    monkeypatch.setattr(server.time, "sleep", _fake_sleep)
+    with pytest.raises(_Stop):
+        server._rescan_loop(app)
+    # One immediate kick, then the configured interval (no leading sleep).
+    assert calls == [app]
+    assert sleeps == [server.RESCAN_INTERVAL]
+
+
+def test_start_periodic_rescan_is_idempotent(monkeypatch):
+    """Calling start twice must not spawn two periodic scanners."""
+    app = HarborApp()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_loop(app_):
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(server, "_rescan_loop", _blocking_loop)
+    try:
+        server.start_periodic_rescan(app)
+        assert started.wait(5)
+        first = app.rescan_thread
+        assert first is not None and first.is_alive()
+        server.start_periodic_rescan(app)
+        assert app.rescan_thread is first
+    finally:
+        release.set()
 
 
 def test_rescan_tolerates_fetch_failure(monkeypatch, tmp_path):
@@ -1718,9 +1847,10 @@ def test_rescan_tolerates_fetch_failure(monkeypatch, tmp_path):
     assert code == 200
 
     deadline = time.time() + 5
-    while app.scan_generation < 1 and time.time() < deadline:
+    while (app.scan_generation < 1 or app.fetch_pending) and time.time() < deadline:
         time.sleep(0.01)
     assert app.scan_generation == 1
+    assert app.fetch_pending is False
     assert app.last_scan_error is None  # a failed fetch is not a failed scan
     assert app.repo_status["/r1"] == status
 
@@ -1754,9 +1884,10 @@ def test_rescan_survives_unexpected_fetch_phase_error(monkeypatch, tmp_path):
     assert code == 200
 
     deadline = time.time() + 5
-    while app.scan_generation < 1 and time.time() < deadline:
+    while (app.scan_generation < 1 or app.fetch_pending) and time.time() < deadline:
         time.sleep(0.01)
     assert app.scan_generation == 1
+    assert app.fetch_pending is False
     assert app.last_scan_error is None
     assert app.repo_status["/r1"] == status
 
@@ -1798,6 +1929,7 @@ def test_rescan_fetch_can_be_disabled_via_config(monkeypatch, tmp_path):
     # The toggle was applied *and* the fetch phase was actually skipped even
     # though a repo was found (the guard above would have fired otherwise).
     assert app.fetch_on_scan is False
+    assert app.fetch_pending is False
     assert app.repo_status["/r1"] == status
 
 

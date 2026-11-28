@@ -977,6 +977,16 @@ def test_resolve_roots_fallback():
     assert roots[0][0] == os.getcwd()
 
 
+def test_resolve_roots_explicit_fallback_overrides_cwd(tmp_path):
+    """A caller that chdir'd away can supply the original directory.
+
+    The daemon chdir's to ``/``; without this the cwd fallback would scan the
+    entire filesystem.
+    """
+    roots = resolve_roots([], None, fallback=str(tmp_path))
+    assert roots == [(str(tmp_path), tmp_path.name)]
+
+
 # ---------------------------------------------------------------------------
 # __main__ — port-in-use error handling
 # ---------------------------------------------------------------------------
@@ -1314,3 +1324,20 @@ def test_fetch_repos_tolerates_malformed_records():
     failures = fetch_repos({"bad": {"name": "no-path"}})
     assert len(failures) == 1
     assert "invalid repo record" in failures[0]
+
+
+def test_get_repos_status_tolerates_shutdown_executor(monkeypatch):
+    """A daemon refresher racing interpreter shutdown must not log a traceback.
+
+    concurrent.futures tears the module-level executor down before daemon
+    threads are stopped, so a late status pass raises RuntimeError from
+    ``submit``.  There is nothing useful to compute while exiting.
+    """
+    import harbor.git as git_mod
+
+    class _DeadExecutor:
+        def map(self, *args, **kwargs):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(git_mod, "_EXECUTOR", _DeadExecutor())
+    assert git_mod.get_repos_status({"r": {"name": "r", "path": "/r"}}) == []

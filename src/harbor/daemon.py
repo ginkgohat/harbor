@@ -33,6 +33,12 @@ PORT_FILE = STATE_DIR / "harbor.port"
 SESSION_SECRET_FILE = STATE_DIR / "harbor.credentials"
 
 
+# How long `harbor start`'s parent waits for the child to bind its socket
+# before reporting "starting" instead of "started".  A normal start binds in
+# well under this; a large first scan legitimately takes longer.
+STARTUP_READY_TIMEOUT = 2.0
+
+
 def _read_pid() -> int | None:
     """Read the PID file, returning the PID or ``None`` if it doesn't exist."""
     if not PID_FILE.is_file():
@@ -72,6 +78,30 @@ def _is_process_alive(pid: int) -> bool:
         # we treat as "not alive" but it's ambiguous — return False.
         return e.errno == errno.EPERM
     return True
+
+
+def _wait_for_startup(timeout: float) -> tuple[int | None, bool]:
+    """Wait briefly for the daemon's PID and a successful socket bind.
+
+    The child writes the PID file before scanning (so ``harbor stop`` works
+    mid-scan) and writes the port file only after binding.  Returns
+    ``(pid, ready)``: ``pid`` is ``None`` when the child is gone, and
+    ``ready`` is ``True`` only once the port file exists — otherwise the
+    process is still scanning and the caller must not claim it "started".
+    """
+    deadline = time.monotonic() + timeout
+    pid: int | None = None
+    while True:
+        current = _read_pid()
+        if current is not None:
+            pid = current
+        if pid is not None and not _is_process_alive(pid):
+            return None, False
+        if pid is not None and PORT_FILE.is_file():
+            return pid, True
+        if time.monotonic() >= deadline:
+            return pid, False
+        time.sleep(0.05)
 
 
 def _pid_start_time(pid: int) -> float | None:
@@ -118,31 +148,41 @@ def cmd_start(serve_args: argparse.Namespace) -> int:
         print(f"  Log: {LOG_FILE}")
         return 0
 
-    # Stale PID file — clean it up.
-    if existing_pid:
-        _remove_pid()
+    # Not running: clear leftover state.  Removing the port file too matters
+    # for the readiness check below — a leftover from a crashed run must not
+    # make a still-scanning child look ready.
+    _remove_pid()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     # In daemon mode, don't auto-open the browser.
     serve_args.no_browser = True
+    # The daemon chdir's to "/" so it doesn't hold the launch directory open.
+    # Pin the launch directory now: without it, a bare `harbor start` with no
+    # saved roots resolves its cwd fallback to "/" and walks the whole disk.
+    serve_args.cwd = os.getcwd()
 
     # --- Daemonize ----------------------------------------------------
     # First fork.
     pid = os.fork()
     if pid > 0:
-        # Parent — wait briefly and report status.
-        time.sleep(0.3)
-        child_pid = _read_pid()
-        if child_pid and _is_process_alive(child_pid):
-            print(f"Harbor started in background (PID {child_pid}).")
-            print(f"  Log: {LOG_FILE}")
-            print("  Stop with:  harbor stop")
-            print("  Status:     harbor status")
-        else:
+        # Parent — wait until the child has bound its socket (or exited).
+        child_pid, ready = _wait_for_startup(STARTUP_READY_TIMEOUT)
+        if child_pid is None:
             print("Harbor failed to start. Check the log for details:")
             print(f"  {LOG_FILE}")
             return 1
+        if not ready:
+            # Still scanning a large tree, or blocked before binding.  Report
+            # honestly; the child may still fail afterwards (e.g. port in use).
+            print(f"Harbor is starting in the background (PID {child_pid}).")
+            print(f"  Log: {LOG_FILE}")
+            print("  Check with: harbor status")
+            return 0
+        print(f"Harbor started in background (PID {child_pid}).")
+        print(f"  Log: {LOG_FILE}")
+        print("  Stop with:  harbor stop")
+        print("  Status:     harbor status")
         return 0
 
     # First child — continue daemonization.

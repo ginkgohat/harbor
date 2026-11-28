@@ -552,6 +552,45 @@ class TestCmdStart:
         captured = capsys.readouterr()
         assert "already running" in captured.out
 
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork (Unix-only)")
+    def test_records_invoking_cwd_before_daemonizing(self, monkeypatch, tmp_path):
+        """The daemon chdir's to /, so the cwd fallback must be pinned first."""
+        import argparse
+
+        args = argparse.Namespace(
+            roots=[],
+            config=str(tmp_path / "config.toml"),
+            no_browser=False,
+            port=None,
+            min_depth=None,
+            max_depth=None,
+        )
+        monkeypatch.setattr(daemon.os, "fork", lambda: 4242)  # parent branch
+        monkeypatch.setattr(daemon, "_wait_for_startup", lambda timeout: (4242, True))
+        assert daemon.cmd_start(args) == 0
+        assert args.cwd == os.getcwd()
+
+
+class TestWaitForStartup:
+    def test_ready_when_port_file_appears(self, monkeypatch):
+        daemon.PID_FILE.write_text("123")
+        daemon.PORT_FILE.write_text("8765")
+        monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: True)
+        assert daemon._wait_for_startup(0.5) == (123, True)
+
+    def test_starting_when_alive_without_port_file(self, monkeypatch):
+        daemon.PID_FILE.write_text("123")
+        monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: True)
+        assert daemon._wait_for_startup(0.05) == (123, False)
+
+    def test_failure_when_child_exits(self, monkeypatch):
+        daemon.PID_FILE.write_text("123")
+        monkeypatch.setattr(daemon, "_is_process_alive", lambda pid: False)
+        assert daemon._wait_for_startup(0.5) == (None, False)
+
+    def test_failure_when_no_pid_appears(self):
+        assert daemon._wait_for_startup(0.05) == (None, False)
+
 
 # ---------------------------------------------------------------------------
 # CLI / argparse tests (top-level and subcommand dispatch)

@@ -372,7 +372,9 @@ def _run_server(args: argparse.Namespace) -> int:
         sys.exit(1)
 
     # --- Resolve roots ------------------------------------------------
-    roots = config_mod.resolve_roots(args.roots, config)
+    roots = config_mod.resolve_roots(
+        args.roots, config, getattr(args, "cwd", None)
+    )
     repos = scanner_mod.scan_roots(roots, min_depth=min_depth, max_depth=max_depth)
 
     for path, label in roots:
@@ -415,6 +417,12 @@ def _run_server(args: argparse.Namespace) -> int:
     # Background repo-status refresher: /api/repos serves a cached snapshot
     # instead of blocking on per-repo git subprocesses on every request.
     server_mod.start_status_refresher(state)
+
+    # Startup + periodic rescan: run the same walk/fetch pass as the Refresh
+    # button right away (so ahead/behind is upstream-true without a click) and
+    # then every RESCAN_INTERVAL (so new clones show up on their own).  Both
+    # run after the socket is bound, so the UI is served immediately.
+    server_mod.start_periodic_rescan(state)
 
     # --- Authentication token + PID file -------------------------------
     # T-011: generate a random token and include it in the URL.

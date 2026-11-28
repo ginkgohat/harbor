@@ -311,7 +311,16 @@ def get_repos_status(repos: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     slow repo from extending the tail linearly.
     """
     # map() preserves input order, matching the previous serial output.
-    return list(_EXECUTOR.map(repo_status, repos.values()))
+    try:
+        return list(_EXECUTOR.map(repo_status, repos.values()))
+    except RuntimeError:
+        # Interpreter shutdown: concurrent.futures has already torn the
+        # module-level executor down while a daemon refresher/fetch thread was
+        # still running.  The process is exiting, so there is nothing useful to
+        # compute; returning an empty snapshot avoids a noisy traceback in the
+        # log (and a serial fallback would only delay shutdown).
+        logger.debug("status executor is shut down; skipping status refresh")
+        return []
 
 
 def _repo_path(repo: Repo | dict[str, Any]) -> str:

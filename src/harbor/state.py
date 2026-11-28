@@ -49,6 +49,13 @@ class HarborApp:
         repo_status: Cached repo status snapshot (path → status dict), kept
             fresh in the background so /api/repos never blocks on git.
         refresher: The daemon thread running the refresh loop, if started.
+        fetch_pending: True while a rescan's background fetch/status pass is
+            still running after the local snapshot was published.
+        fetching: True while a fetch thread is running (guards against
+            starting a second fetch concurrently).
+        fetch_lock: Guards ``fetching``.
+        rescan_thread: The daemon thread running the startup/periodic rescan
+            loop, if started.
         scan_generation: Count of completed scans (frontend waits on it after
             kicking a background rescan via the X-Harbor-Scan-Gen header).
         rescanning: True while a background rescan worker is running.
@@ -110,6 +117,16 @@ class HarborApp:
     repo_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     # The daemon thread running the refresh loop (None until started).
     refresher: threading.Thread | None = None
+    # True between publishing a local snapshot and finishing the background
+    # fetch + post-fetch status pass.  Lets observers tell "local status is
+    # final" apart from "upstream counts are still being refreshed".
+    fetch_pending: bool = False
+    # True while a fetch thread is running.  Separate from ``rescanning`` so a
+    # slow remote never blocks a later rescan's local publish.
+    fetching: bool = False
+    fetch_lock: threading.Lock = field(default_factory=threading.Lock)
+    # The daemon thread running the startup/periodic rescan loop.
+    rescan_thread: threading.Thread | None = None
 
     # --- background rescan ---
     # Count of completed scans; /api/repos reports it via the
