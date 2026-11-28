@@ -1237,6 +1237,9 @@ function readScanHeaders(res) {
     gen: num("X-Harbor-Scan-Gen"),
     done: num("X-Harbor-Scan-Done"),
     epoch: res.headers.get("X-Harbor-Epoch") || "",
+    // The server publishes local status first and fetches remotes afterwards;
+    // this flag says the ahead/behind counts are still being refreshed.
+    fetchPending: res.headers.get("X-Harbor-Fetch-Pending") === "1",
     error,
   };
 }
@@ -1268,9 +1271,42 @@ async function waitForScan(scanSeq, epoch, timeoutMs) {
     serverEpoch = epoch;
     lastScanDone = h.done;
     render();
-    return { count: repos.length };
+    return { count: repos.length, fetchPending: h.fetchPending };
   }
   return null; // timed out — caller falls back to loadRepos()
+}
+
+// The click-triggered scan publishes local status first and fetches remotes in
+// the background, so `waitForScan` can return while ahead/behind still changes.
+// Poll quietly (no toast, no busy button) until the fetch phase ends and then
+// render the upstream-true counts; a slow remote never delays the refresh.
+const FETCH_WAIT_MS = 30000;
+
+async function refreshAfterFetch(epoch) {
+  const deadline = Date.now() + FETCH_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 600));
+    let res;
+    try {
+      res = await fetch(`/api/repos`, { signal: AbortSignal.timeout(10000) });
+    } catch (_) {
+      continue;  // transient failure — keep waiting for the fetch to land
+    }
+    if (!res.ok) continue;
+    const h = readScanHeaders(res);
+    if (epoch && h.epoch && h.epoch !== epoch) return;  // server restarted
+    if (h.done < lastScanDone) continue;  // older snapshot than what we render
+    let body;
+    try {
+      body = await res.json();
+    } catch (_) {
+      continue;
+    }
+    lastScanDone = h.done;
+    repos = body;
+    render();
+    if (!h.fetchPending) return;
+  }
 }
 
 // Briefly show a one-line message in the stats area, then re-render it from
@@ -1388,6 +1424,9 @@ $("#refreshBtn").addEventListener("click", async () => {
       lastRefreshAt = new Date();
       flash(t("refreshDone", result.count));
       finishActivity(t("refreshDone", result.count), "ok");
+      // Local status is already on screen; pick up the upstream-true counts
+      // when the background fetch finishes, without another user-visible wait.
+      if (result.fetchPending) refreshAfterFetch(epoch);
     }
   } catch (err) {
     console.error("rescan failed:", err);

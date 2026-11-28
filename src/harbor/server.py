@@ -210,24 +210,35 @@ def _get_repos(self: Handler, m: re.Match[str], parsed: ParseResult, body: Any) 
         err = app_state.last_scan_error
         repos = app_state.repos
         snapshot = app_state.repo_status
+        status_gen = app_state.status_generation
+        fetch_pending = app_state.fetch_pending
     if not snapshot and repos:
-        live = {s["path"]: s for s in git_ops.get_repos_status(repos)}
-        with app_state.state_lock:
-            if app_state.repos is repos and app_state.scan_generation == gen:
-                app_state.repo_status = live
-                snapshot = live
-            else:
-                # A rescan published a newer repo set/snapshot while we were
-                # computing; never overwrite it with this stale result.
-                gen = app_state.scan_generation
-                done = app_state.scan_completed_seq
-                epoch = app_state.epoch
-                err = app_state.last_scan_error
-                snapshot = app_state.repo_status
+        statuses = git_ops.get_repos_status(repos)
+        if statuses is not None:
+            live = {s["path"]: s for s in statuses}
+            with app_state.state_lock:
+                if (
+                    app_state.repos is repos
+                    and app_state.scan_generation == gen
+                    and app_state.status_generation == status_gen
+                ):
+                    app_state.repo_status = live
+                    app_state.status_generation += 1
+                    snapshot = live
+                else:
+                    # A rescan/fetch published a newer snapshot while we were
+                    # computing; never overwrite it with this stale result.
+                    gen = app_state.scan_generation
+                    done = app_state.scan_completed_seq
+                    epoch = app_state.epoch
+                    err = app_state.last_scan_error
+                    snapshot = app_state.repo_status
+                    fetch_pending = app_state.fetch_pending
     headers = {
         "X-Harbor-Scan-Gen": str(gen),
         "X-Harbor-Epoch": epoch,
         "X-Harbor-Scan-Done": str(done),
+        "X-Harbor-Fetch-Pending": "1" if fetch_pending else "0",
     }
     if err:
         headers["X-Harbor-Scan-Error"] = quote(err, safe="")
@@ -582,29 +593,43 @@ def start_pull_all_job(repos: dict[str, dict[str, Any]]) -> str:
 REFRESH_INTERVAL = 30.0
 
 
+class _StatusUnavailable(Exception):
+    """The status executor is gone (interpreter shutdown)."""
+
+
 def _refresh_once(app: HarborApp) -> None:
     """Compute one fresh status snapshot for ``app.repos`` and swap it in.
 
-    The (repo set, generation) pair is captured under ``state_lock`` and the
-    status computation runs outside it.  The snapshot is published only if
-    neither changed meanwhile: a rescan rebinds ``app.repos`` and bumps
-    ``scan_generation``, which makes this pass stale.  A stale pass is simply
-    discarded — the previous snapshot is kept so a concurrent /api/repos never
-    regresses to an empty list.
+    The (repo set, generation, snapshot version) triple is captured under
+    ``state_lock`` and the status computation runs outside it.  The snapshot is
+    published only if none of them changed meanwhile: a rescan rebinds
+    ``app.repos``, and a background fetch bumps ``status_generation`` when it
+    republishes.  Either makes this pass stale; a stale pass is discarded and
+    the previous snapshot is kept so a concurrent /api/repos never regresses to
+    an empty list.
     """
     with app.state_lock:
         repos = app.repos
         gen = app.scan_generation
+        status_gen = app.status_generation
     try:
-        snapshot = {s["path"]: s for s in git_ops.get_repos_status(repos)}
+        statuses = git_ops.get_repos_status(repos)
+        if statuses is None:
+            return
+        snapshot = {s["path"]: s for s in statuses}
     except Exception:
         # One bad iteration (a pathological repo) must not kill the
         # refresher — log, keep the last good snapshot, and retry next cycle.
         logger.exception("status refresh failed; will retry")
         return
     with app.state_lock:
-        if app.repos is repos and app.scan_generation == gen:
+        if (
+            app.repos is repos
+            and app.scan_generation == gen
+            and app.status_generation == status_gen
+        ):
             app.repo_status = snapshot
+            app.status_generation += 1
 
 
 def _refresh_loop(app: HarborApp) -> None:
@@ -736,6 +761,15 @@ def _rescan_worker(app: HarborApp) -> None:
             # Local status is cheap and is what the dashboard renders; compute
             # and publish it before any network work.
             statuses = git_ops.get_repos_status(new_repos)
+            if statuses is None:
+                raise _StatusUnavailable
+        except _StatusUnavailable:
+            # The git executor is already shut down (interpreter exit): there
+            # is no snapshot to publish and no point logging a failure.
+            with app.state_lock:
+                app.last_scan_error = "status unavailable (shutting down)"
+                app.scan_completed_seq = max(app.scan_completed_seq, target)
+            logger.debug("background rescan aborted: status executor is gone")
         except Exception as exc:
             # Do not bump the generation — the frontend sees scan_completed_seq
             # advance but gen unchanged, plus the error header, and reports a
@@ -749,6 +783,7 @@ def _rescan_worker(app: HarborApp) -> None:
             with app.state_lock:
                 app.repos = new_repos
                 app.repo_status = {s["path"]: s for s in statuses}
+                app.status_generation += 1
                 app.scan_generation += 1
                 app.scan_completed_seq = max(app.scan_completed_seq, target)
                 app.last_scan_error = None
@@ -775,11 +810,27 @@ def _start_fetch(
     Keeping the fetch out of the rescan worker's single-flight lock means a
     refresh clicked while a startup/periodic fetch is stuck still publishes
     its own local snapshot immediately.
+
+    If a fetch for an older repo set is still in flight, record
+    ``fetch_requested`` instead of dropping the request: the running pass
+    re-fetches the *current* repo set when it finishes, so a rescan that
+    discovers new repos while the network is slow is still fetched now rather
+    than at the next hourly pass.
     """
+    with app.state_lock:
+        app.fetch_pending = True
     with app.fetch_lock:
         if app.fetching:
-            return  # the running fetch owns ``fetch_pending``
+            app.fetch_requested = True
+            return
         app.fetching = True
+    _spawn_fetch(app, repos, generation)
+
+
+def _spawn_fetch(
+    app: HarborApp, repos: dict[str, dict[str, Any]], generation: int
+) -> None:
+    """Start a fetch thread; the caller owns ``app.fetching``."""
     logger.info("rescan: local status published; fetching %d repo(s)", len(repos))
     try:
         threading.Thread(
@@ -789,9 +840,9 @@ def _start_fetch(
             name="rescan-fetch",
         ).start()
     except Exception:
-        with app.fetch_lock:
+        with app.state_lock, app.fetch_lock:
             app.fetching = False
-        with app.state_lock:
+            app.fetch_requested = False
             app.fetch_pending = False
         logger.exception("rescan: could not start fetch thread; using local refs")
 
@@ -806,8 +857,15 @@ def _fetch_and_republish(
     view, and one broken remote must not turn it into an error.  The publish
     and the ``fetch_pending`` clear happen together under ``state_lock`` so a
     reader never sees "fetch finished" paired with the pre-fetch snapshot.
+
+    A rescan that landed mid-fetch set ``fetch_requested``; this pass then
+    leaves ``fetching`` set, keeps ``fetch_pending`` on, and immediately starts
+    another pass for the repo set that is current now.
     """
     statuses: list[dict[str, Any]] | None = None
+    catch_up = False
+    next_repos = repos
+    next_gen = generation
     try:
         try:
             failures = git_ops.fetch_repos(repos)
@@ -829,16 +887,27 @@ def _fetch_and_republish(
     except Exception:
         logger.exception("rescan: post-fetch status refresh failed")
     finally:
-        with app.state_lock:
+        # state_lock → fetch_lock order; no other path takes them reversed.
+        with app.state_lock, app.fetch_lock:
             if (
                 statuses is not None
                 and app.repos is repos
                 and app.scan_generation == generation
             ):
                 app.repo_status = {s["path"]: s for s in statuses}
-            app.fetch_pending = False
-        with app.fetch_lock:
-            app.fetching = False
+                app.status_generation += 1
+            catch_up = app.fetch_requested
+            app.fetch_requested = False
+            if catch_up:
+                next_repos = app.repos
+                next_gen = app.scan_generation
+            else:
+                app.fetching = False
+                app.fetch_pending = False
+    if catch_up:
+        # ``fetching`` stays True across the hand-off, so a rescan arriving
+        # now still queues behind this pass instead of racing a second fetch.
+        _spawn_fetch(app, next_repos, next_gen)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

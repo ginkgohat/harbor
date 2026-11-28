@@ -1047,6 +1047,63 @@ def test_failed_start_leaves_running_instance_state_files_untouched(
     assert port_file.read_text() == "8765"
 
 
+def test_run_server_binds_before_scanning(monkeypatch, tmp_path):
+    """Bind first so `harbor start` readiness catches a busy port immediately.
+
+    The initial scan can take seconds on a large tree; if the bind happened
+    after it, the parent's short readiness wait would report "starting" for a
+    child that is already doomed by a port conflict.
+    """
+    from harbor import daemon as daemon_mod
+    from harbor.__main__ import _build_parser, _run_server
+
+    state_dir = _redirect_daemon_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon_mod, "_read_pid", lambda: None)
+    order: list[str] = []
+
+    class _Server:
+        def serve_forever(self):
+            raise SystemExit(0)
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(
+        "harbor.__main__._create_server",
+        lambda port: order.append("bind") or _Server(),
+    )
+    monkeypatch.setattr(
+        "harbor.__main__.scanner_mod.scan_roots",
+        lambda *a, **k: order.append("scan") or {},
+    )
+    monkeypatch.setattr("harbor.__main__._try_open_browser", lambda url: None)
+    monkeypatch.setattr("harbor.__main__.server_mod.start_status_refresher", lambda a: None)
+    monkeypatch.setattr("harbor.__main__.server_mod.start_periodic_rescan", lambda a: None)
+
+    class _NoAtexit:
+        @staticmethod
+        def register(fn):
+            pass
+
+    monkeypatch.setattr("harbor.__main__.atexit", _NoAtexit)
+
+    args = _build_parser().parse_args(
+        [
+            "serve",
+            str(tmp_path),
+            "--config",
+            str(tmp_path / "config.toml"),
+            "--no-browser",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        _run_server(args)
+
+    assert order == ["bind", "scan"]
+    # The port file is published at bind time, which is what readiness checks.
+    assert (state_dir / "harbor.port").read_text() == "8765"
+
+
 # ---------------------------------------------------------------------------
 # T-002 — stale job TTL sweep
 # ---------------------------------------------------------------------------
@@ -1645,6 +1702,73 @@ def test_refresh_once_preserves_snapshot_when_repos_rebound():
     assert app.repo_status == old_snapshot
 
 
+def test_get_repos_reports_fetch_pending_header():
+    """The frontend needs to know when the background fetch is still running."""
+    app = server.app_state
+    app.repos = {"fake": {"name": "fake", "path": "fake"}}
+    app.repo_status = {"fake": {"name": "fake", "path": "fake"}}
+    for pending, expected in ((True, "1"), (False, "0")):
+        app.fetch_pending = pending
+        h = _make_handler("GET", "/api/repos")
+        h.do_GET()
+        headers = _response_headers(h)
+        assert f"X-Harbor-Fetch-Pending: {expected}" in headers
+
+
+def test_refresh_once_keeps_post_fetch_snapshot(monkeypatch):
+    """A 30s status pass must not overwrite a snapshot published by a fetch."""
+    app = HarborApp()
+    app.repos = {"r1": {"name": "r1", "path": "/r1"}}
+    before = {"name": "r1", "path": "/r1", "behind": 0}
+    after = {"name": "r1", "path": "/r1", "behind": 3}
+    app.repo_status = {"r1": dict(before)}
+    app.status_generation = 0
+
+    def _fetch_published_during_pass(repos):
+        # Simulate the fetch thread publishing while this pass computes.
+        app.repo_status = {"r1": dict(after)}
+        app.status_generation += 1
+        return [dict(before)]
+
+    with patch(
+        "harbor.server.git_ops.get_repos_status",
+        side_effect=_fetch_published_during_pass,
+    ):
+        server._refresh_once(app)
+    assert app.repo_status == {"r1": after}
+
+
+def test_refresh_once_keeps_snapshot_when_status_unavailable():
+    """A dead executor must not replace the last good snapshot with nothing."""
+    app = HarborApp()
+    app.repos = {"r1": {"name": "r1", "path": "/r1"}}
+    before = {"r1": {"name": "r1", "path": "/r1", "dirty": True}}
+    app.repo_status = dict(before)
+    with patch("harbor.server.git_ops.get_repos_status", return_value=None):
+        server._refresh_once(app)
+    assert app.repo_status == before
+
+
+def test_fetch_republish_keeps_snapshot_when_status_unavailable():
+    """An unavailable post-fetch status must not wipe the dashboard."""
+    app = HarborApp()
+    repos = {"r1": {"name": "r1", "path": "/r1"}}
+    before = {"r1": {"name": "r1", "path": "/r1", "dirty": True}}
+    app.repos = repos
+    app.scan_generation = 2
+    app.repo_status = dict(before)
+    app.fetch_pending = True
+    app.fetching = True
+    with (
+        patch("harbor.server.git_ops.fetch_repos", return_value=[]),
+        patch("harbor.server.git_ops.get_repos_status", return_value=None),
+    ):
+        server._fetch_and_republish(app, repos, 2)
+    assert app.repo_status == before
+    assert app.fetch_pending is False
+    assert app.fetching is False
+
+
 # ---------------------------------------------------------------------------
 # Rescan fetches remotes so refresh sees upstream commits
 # ---------------------------------------------------------------------------
@@ -1706,35 +1830,54 @@ def test_rescan_publishes_local_status_before_fetch(monkeypatch, tmp_path):
     assert app.repo_status["/r1"] == upstream
 
 
-def test_rescan_during_inflight_fetch_does_not_wait_for_it(monkeypatch, tmp_path):
-    """A second refresh publishes while the first pass's fetch is still stuck.
+def test_fetch_skipped_during_inflight_pass_catches_up_for_new_repos(
+    monkeypatch, tmp_path
+):
+    """A rescan during a fetch publishes at once, then fetches the new set.
 
-    The fetch phase must not hold the rescan single-flight lock: otherwise a
-    click that lands during a startup/periodic fetch waits for that remote
-    before its own local snapshot is published — exactly the 20s stall the
-    local-first design is meant to remove.
+    Skipping the second fetch must not leave the new repo set unfetched until
+    the next hourly rescan: when the in-flight pass finishes, a follow-up
+    fetch runs for whatever repo set is current then.
     """
     app = server.app_state
     app.config_path = str(tmp_path / "config.toml")
     app.roots = []
-    new_repos = {"r1": {"name": "r1", "path": "/r1"}}
-    status = {"name": "r1", "path": "/r1", "dirty": False, "behind": 0}
-    fetch_started = threading.Event()
-    release_fetch = threading.Event()
-    fetch_calls = []
-
-    monkeypatch.setattr(
-        server.scanner_mod, "scan_roots", lambda *a, **k: dict(new_repos)
+    scans = iter(
+        [
+            {"/r1": {"name": "r1", "path": "/r1"}},
+            {"/r2": {"name": "r2", "path": "/r2"}},
+        ]
     )
-    monkeypatch.setattr(server.git_ops, "get_repos_status", lambda repos: [status])
+    local = {
+        "/r1": {"name": "r1", "path": "/r1", "dirty": False, "behind": 0},
+        "/r2": {"name": "r2", "path": "/r2", "dirty": False, "behind": 0},
+    }
+    upstream = {
+        "/r1": {"name": "r1", "path": "/r1", "dirty": False, "behind": 1},
+        "/r2": {"name": "r2", "path": "/r2", "dirty": False, "behind": 2},
+    }
+    fetch_started = threading.Event()
+    release_first = threading.Event()
+    fetch_calls: list[list[str]] = []
+    fetched: set[str] = set()
 
-    def _blocking_fetch(repos):
-        fetch_calls.append(list(repos))
-        fetch_started.set()
-        release_fetch.wait(5)
+    monkeypatch.setattr(server.scanner_mod, "scan_roots", lambda *a, **k: next(scans))
+    monkeypatch.setattr(
+        server.git_ops,
+        "get_repos_status",
+        lambda repos: [(upstream if path in fetched else local)[path] for path in repos],
+    )
+
+    def _fetch(repos):
+        paths = list(repos)
+        fetch_calls.append(paths)
+        fetched.update(paths)
+        if paths == ["/r1"]:
+            fetch_started.set()
+            release_first.wait(5)
         return []
 
-    monkeypatch.setattr(server.git_ops, "fetch_repos", _blocking_fetch)
+    monkeypatch.setattr(server.git_ops, "fetch_repos", _fetch)
 
     h = _make_handler("POST", "/api/rescan", body=b"{}")
     h.do_POST()
@@ -1742,7 +1885,7 @@ def test_rescan_during_inflight_fetch_does_not_wait_for_it(monkeypatch, tmp_path
     assert fetch_started.wait(5)
     assert app.fetch_pending is True
 
-    # The fetch is still blocked, but a new rescan must still complete.
+    # The first fetch is still blocked, but the second rescan publishes /r2.
     h = _make_handler("POST", "/api/rescan", body=b"{}")
     h.do_POST()
     _, second = _read_response(h)
@@ -1751,16 +1894,20 @@ def test_rescan_during_inflight_fetch_does_not_wait_for_it(monkeypatch, tmp_path
         time.sleep(0.01)
     assert app.scan_completed_seq >= second["scan_seq"]
     assert app.scan_completed_seq >= first["scan_seq"]
-    # The still-running fetch is not duplicated by the second pass.
-    assert fetch_calls == [list(new_repos)]
+    assert app.repo_status["/r2"] == local["/r2"]
+    # No duplicate fetch while the first is still running.
+    assert fetch_calls == [["/r1"]]
     assert app.fetch_pending is True
 
-    release_fetch.set()
+    # Finishing the stale pass must trigger a catch-up fetch for /r2.
+    release_first.set()
     deadline = time.time() + 5
     while app.fetch_pending and time.time() < deadline:
         time.sleep(0.01)
     assert app.fetch_pending is False
-    assert app.repo_status["/r1"] == status
+    assert fetch_calls == [["/r1"], ["/r2"]]
+    assert app.repo_status["/r2"] == upstream["/r2"]
+    assert "/r1" not in app.repo_status
 
 
 def test_periodic_rescan_once_requests_a_scan(monkeypatch):

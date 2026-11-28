@@ -1340,4 +1340,4 @@ def test_get_repos_status_tolerates_shutdown_executor(monkeypatch):
             raise RuntimeError("cannot schedule new futures after shutdown")
 
     monkeypatch.setattr(git_mod, "_EXECUTOR", _DeadExecutor())
-    assert git_mod.get_repos_status({"r": {"name": "r", "path": "/r"}}) == []
+    assert git_mod.get_repos_status({"r": {"name": "r", "path": "/r"}}) is None

@@ -51,9 +51,15 @@ class HarborApp:
         refresher: The daemon thread running the refresh loop, if started.
         fetch_pending: True while a rescan's background fetch/status pass is
             still running after the local snapshot was published.
+        fetch_requested: True when a rescan needed a fetch while another fetch
+            was already running; the running pass re-fetches the current repo
+            set when it finishes instead of dropping the request.
         fetching: True while a fetch thread is running (guards against
             starting a second fetch concurrently).
-        fetch_lock: Guards ``fetching``.
+        fetch_lock: Guards ``fetching`` and ``fetch_requested``.
+        status_generation: Monotonic version of ``repo_status``.  A pass that
+            computed a snapshot captures it and publishes only if no newer
+            publisher (rescan, fetch, fallback) won the race.
         rescan_thread: The daemon thread running the startup/periodic rescan
             loop, if started.
         scan_generation: Count of completed scans (frontend waits on it after
@@ -121,10 +127,17 @@ class HarborApp:
     # fetch + post-fetch status pass.  Lets observers tell "local status is
     # final" apart from "upstream counts are still being refreshed".
     fetch_pending: bool = False
+    # True when a fetch was requested while another was running (the running
+    # pass catches up for the current repo set before clearing it).
+    fetch_requested: bool = False
     # True while a fetch thread is running.  Separate from ``rescanning`` so a
     # slow remote never blocks a later rescan's local publish.
     fetching: bool = False
     fetch_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Monotonic version of repo_status.  Bumped on every publish so a pass
+    # that computed from an older view can detect it lost the race (e.g. the
+    # 30s refresher finishing after a fetch republished the snapshot).
+    status_generation: int = 0
     # The daemon thread running the startup/periodic rescan loop.
     rescan_thread: threading.Thread | None = None
 

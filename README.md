@@ -307,7 +307,7 @@ reverse-proxy Harbor to an untrusted network.
 
 Harbor scans the given root directory for `.git` subdirectories using `os.walk` (cross-platform). For each repo it runs `git` commands to determine status, then serves the results as a JSON API. The frontend is a single-page HTML file that talks to this API, with SSE for real-time pull progress.
 
-Clicking **Refresh** — as well as startup and the periodic 5-minute rescan — runs `git fetch` in every repo (concurrently, bounded per repo and ~20s overall). The locally computed status is published first so the page updates immediately; the fetch then updates ahead/behind in the background, measured against what actually exists upstream rather than the clone's last-known remote refs. A fetch failure (offline, no remote, auth prompt) never fails the refresh — that repo falls back to its local state.
+Clicking **Refresh** — as well as startup and the hourly rescan — runs `git fetch` in every repo (concurrently, bounded per repo and ~20s overall). The locally computed status is published first so the page updates immediately; the fetch then updates ahead/behind in the background, measured against what actually exists upstream rather than the clone's last-known remote refs. A fetch failure (offline, no remote, auth prompt) never fails the refresh — that repo falls back to its local state.
 
 For architecture details and project structure, see [CONTRIBUTING.md](CONTRIBUTING.md#project-structure).
 

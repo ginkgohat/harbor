@@ -303,12 +303,18 @@ STATUS_WORKERS = 8
 _EXECUTOR = ThreadPoolExecutor(max_workers=STATUS_WORKERS)
 
 
-def get_repos_status(repos: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def get_repos_status(
+    repos: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]] | None:
     """Return status for every repo in *repos*, collected concurrently.
 
     Each repo runs several git subprocesses; running them in a thread pool
     cuts total refresh latency roughly by the worker count and keeps one
     slow repo from extending the tail linearly.
+
+    Returns ``None`` when the shared executor is already shut down (interpreter
+    shutdown).  That is deliberately distinct from ``[]`` ("no repos"): callers
+    must keep the last good snapshot instead of publishing an empty one.
     """
     # map() preserves input order, matching the previous serial output.
     try:
@@ -317,10 +323,10 @@ def get_repos_status(repos: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         # Interpreter shutdown: concurrent.futures has already torn the
         # module-level executor down while a daemon refresher/fetch thread was
         # still running.  The process is exiting, so there is nothing useful to
-        # compute; returning an empty snapshot avoids a noisy traceback in the
-        # log (and a serial fallback would only delay shutdown).
+        # compute; returning None avoids a noisy traceback and, unlike ``[]``,
+        # cannot be mistaken for a valid empty snapshot.
         logger.debug("status executor is shut down; skipping status refresh")
-        return []
+        return None
 
 
 def _repo_path(repo: Repo | dict[str, Any]) -> str:
